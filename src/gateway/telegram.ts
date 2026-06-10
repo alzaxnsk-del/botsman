@@ -10,15 +10,15 @@ import type { DeployEngine } from '../deploy/engine.js';
 import type { Stage } from '../types.js';
 
 const STAGE_LABELS: Record<Stage, string> = {
-  accepted: '📥 Принял, делаю…',
-  generating: '🤖 Генерирую код',
-  committing: '💾 Коммичу изменения',
-  building: '🔨 Собираю образ',
-  deploying: '🚀 Деплою',
-  checking: '🔍 Проверяю, что сервис отвечает',
-  screenshot: '📸 Делаю скриншот',
-  done: '✅ Готово',
-  failed: '❌ Ошибка',
+  accepted: '📥 Got it, working…',
+  generating: '🤖 Generating code',
+  committing: '💾 Committing changes',
+  building: '🔨 Building the image',
+  deploying: '🚀 Deploying',
+  checking: '🔍 Checking the service responds',
+  screenshot: '📸 Taking a screenshot',
+  done: '✅ Done',
+  failed: '❌ Failed',
 };
 
 const HEARTBEAT_MS = 25_000; // never silent longer than 30s (§4 EPIC B)
@@ -54,7 +54,7 @@ export class TelegramGateway {
     this.bot.use(async (ctx, next) => {
       if (!this.isOwner(ctx)) {
         logger.warn('rejected non-owner message', { from: ctx.from?.id });
-        if (ctx.message) await ctx.reply('Это приватный бот. Доступ только у владельца.');
+        if (ctx.message) await ctx.reply('This is a private bot. Only its owner can use it.');
         return;
       }
       await this.telemetry.onActivity();
@@ -64,19 +64,19 @@ export class TelegramGateway {
     this.bot.command('start', (ctx) =>
       ctx.reply(
         [
-          'Привет! Я Botsman — деплою веб-сервисы по описанию.',
+          "Hi! I'm Botsman — I build and deploy web services from plain descriptions.",
           '',
-          'Просто напиши, какой сервис нужен, например:',
-          '«сделай TODO-сервис со списком задач и возможностью отмечать выполненные»',
+          'Just tell me what you need, for example:',
+          '"make a TODO service with a task list and the ability to mark tasks done"',
           '',
-          'Через несколько минут пришлю ссылку и скриншот. Правки — тем же чатом.',
+          "In a few minutes you'll get a link and a screenshot. Iterate in this same chat.",
           '',
-          'Команды:',
-          '/list — все проекты',
-          '/status <slug> — статус и git-доступ',
-          '/logs <slug> — логи контейнера',
-          '/rollback <slug> — откат на предыдущую версию',
-          '/delete <slug> — удалить проект',
+          'Commands:',
+          '/list — all projects',
+          '/status <slug> — status and git access',
+          '/logs <slug> — container logs',
+          '/rollback <slug> — roll back to the previous version',
+          '/delete <slug> — delete a project',
         ].join('\n'),
       ),
     );
@@ -84,7 +84,7 @@ export class TelegramGateway {
     this.bot.command('list', async (ctx) => {
       const projects = this.store.listProjects();
       if (!projects.length) {
-        await ctx.reply('Проектов пока нет. Опиши сервис — и я его создам.');
+        await ctx.reply('No projects yet. Describe a service — and I will build it.');
         return;
       }
       const lines = await Promise.all(
@@ -92,7 +92,7 @@ export class TelegramGateway {
           const running = p.status === 'live'
             ? await this.deployEngine.containerRunning(p.slug).catch(() => false)
             : false;
-          const mark = p.status === 'live' ? (running ? '🟢' : '🟡 (контейнер упал)') : statusEmoji(p.status);
+          const mark = p.status === 'live' ? (running ? '🟢' : '🟡 (container down)') : statusEmoji(p.status);
           return `${mark} *${p.slug}* — ${p.status}\nhttps://${p.domain}/`;
         }),
       );
@@ -101,34 +101,34 @@ export class TelegramGateway {
 
     this.bot.command('status', async (ctx) => {
       const slug = this.argSlug(ctx);
-      if (!slug) return void ctx.reply('Использование: /status <slug>');
+      if (!slug) return void ctx.reply('Usage: /status <slug>');
       const text = await this.orchestrator.statusText(slug);
-      if (!text) return void ctx.reply(`Проект ${slug} не найден.`);
+      if (!text) return void ctx.reply(`Project ${slug} not found.`);
       await this.replyMdSafe(ctx, text);
     });
 
     this.bot.command('logs', async (ctx) => {
       const slug = this.argSlug(ctx);
-      if (!slug) return void ctx.reply('Использование: /logs <slug>');
-      if (!this.store.projectExists(slug)) return void ctx.reply(`Проект ${slug} не найден.`);
-      const logs = await this.deployEngine.containerLogs(slug, 50).catch((e) => `Ошибка: ${e.message}`);
-      await this.replyMdSafe(ctx, `Логи ${slug} (последние строки):\n\`\`\`\n${logs.slice(-3500) || '(пусто)'}\n\`\`\``);
+      if (!slug) return void ctx.reply('Usage: /logs <slug>');
+      if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
+      const logs = await this.deployEngine.containerLogs(slug, 50).catch((e) => `Error: ${e.message}`);
+      await this.replyMdSafe(ctx, `Logs for ${slug} (last lines):\n\`\`\`\n${logs.slice(-3500) || '(empty)'}\n\`\`\``);
     });
 
     this.bot.command('rollback', async (ctx) => {
       const slug = this.argSlug(ctx);
-      if (!slug) return void ctx.reply('Использование: /rollback <slug>');
-      if (!this.store.projectExists(slug)) return void ctx.reply(`Проект ${slug} не найден.`);
+      if (!slug) return void ctx.reply('Usage: /rollback <slug>');
+      if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
       await this.runTask('rollback', slug, 'rollback', ctx);
     });
 
     this.bot.command('delete', async (ctx) => {
       const slug = this.argSlug(ctx);
-      if (!slug) return void ctx.reply('Использование: /delete <slug>');
-      if (!this.store.projectExists(slug)) return void ctx.reply(`Проект ${slug} не найден.`);
+      if (!slug) return void ctx.reply('Usage: /delete <slug>');
+      if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
       this.pendingDelete.set(ctx.chat!.id, slug);
       await ctx.reply(
-        `⚠️ Удалить проект *${slug}* вместе с базой данных и кодом? Это необратимо.\n\nОтветь «да» для подтверждения, что-либо другое — отмена.`,
+        `⚠️ Delete project *${slug}* together with its database and code? This cannot be undone.\n\nReply "yes" to confirm; anything else cancels.`,
         { parse_mode: 'Markdown' },
       );
     });
@@ -142,7 +142,7 @@ export class TelegramGateway {
       const pending = this.pendingAmbiguous.get(chatId);
       // A click on an outdated question must not apply the latest text.
       if (!pending || pending.messageId !== ctx.callbackQuery.message?.message_id) {
-        return void ctx.reply('Эта кнопка устарела, напиши запрос заново.');
+        return void ctx.reply('This button is stale — send your request again.');
       }
       this.pendingAmbiguous.delete(chatId);
       if (data === 'intent:new') {
@@ -164,7 +164,7 @@ export class TelegramGateway {
           const outcome = await this.orchestrator.enqueue('delete', '', () => {}, pending);
           await ctx.reply(outcome.ok ? `🗑 ${outcome.summary}` : `❌ ${outcome.error}`);
         } else {
-          await ctx.reply('Удаление отменено.');
+          await ctx.reply('Deletion cancelled.');
         }
         return;
       }
@@ -176,11 +176,11 @@ export class TelegramGateway {
       );
 
       if (intent.kind === 'ambiguous') {
-        const kb = new InlineKeyboard().text('🆕 Новый сервис', 'intent:new');
+        const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
         if (intent.lastSlug && this.store.projectExists(intent.lastSlug)) {
-          kb.text(`✏️ Правка ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
+          kb.text(`✏️ Edit ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
         }
-        const sent = await ctx.reply('Это новый сервис или правка существующего?', { reply_markup: kb });
+        const sent = await ctx.reply('Is this a new service or a change to an existing one?', { reply_markup: kb });
         this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text });
         return;
       }
@@ -203,7 +203,7 @@ export class TelegramGateway {
     ctx: Context,
   ): Promise<void> {
     const chatId = ctx.chat!.id;
-    const queued = this.orchestrator.queueLength > 0 ? ' (в очереди за текущей задачей)' : '';
+    const queued = this.orchestrator.queueLength > 0 ? ' (queued behind the current task)' : '';
     const statusMsg = await ctx.reply(`${STAGE_LABELS.accepted}${queued}`);
 
     let lastText = STAGE_LABELS.accepted;
@@ -244,16 +244,16 @@ export class TelegramGateway {
     if (!o.ok) {
       await this.bot.api.editMessageText(
         chatId, statusMsgId,
-        `❌ Не получилось с «${o.slug}»:\n\n${(o.error ?? 'неизвестная ошибка').slice(0, 3000)}`,
+        `❌ Failed on "${o.slug}":\n\n${(o.error ?? 'unknown error').slice(0, 3000)}`,
       ).catch(() => {});
       return;
     }
-    const lines = [`✅ *${o.slug}* — задеплоен`];
+    const lines = [`✅ *${o.slug}* — deployed`];
     if (o.url) lines.push(o.url);
     if (o.summary) lines.push('', o.summary.slice(0, 2000));
     if (o.warning) lines.push('', `⚠️ ${o.warning}`);
-    if (o.costUsd && o.costUsd > 0) lines.push('', `💸 Токены: ≈$${o.costUsd.toFixed(2)}`);
-    lines.push('', 'Что поправить?');
+    if (o.costUsd && o.costUsd > 0) lines.push('', `💸 Tokens: ≈$${o.costUsd.toFixed(2)}`);
+    lines.push('', 'What should I change?');
     await this.bot.api.editMessageText(chatId, statusMsgId, lines.join('\n'), {
       parse_mode: 'Markdown',
       link_preview_options: { is_disabled: true },

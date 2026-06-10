@@ -129,7 +129,7 @@ export class ClaudeCodeAgent implements CodingAgent {
       return {
         ok: false,
         summary: '',
-        error: `Не удалось запустить контейнер агента (образ ${image}): ${(e as Error).message}`,
+        error: `Failed to start the agent container (image ${image}): ${(e as Error).message}`,
         durationMs: Date.now() - started,
       };
     } finally {

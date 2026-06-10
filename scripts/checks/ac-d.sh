@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# AC-D: управление и изоляция. Usage: ./ac-d.sh <slug-a> <slug-b>
-# (нужно два задеплоенных проекта; AC-D1 и AC-D4 — ручные шаги внизу)
+# AC-D: management and isolation. Usage: ./ac-d.sh <slug-a> <slug-b>
+# (requires two deployed projects; AC-D1 and AC-D4 are manual steps below)
 . "$(dirname "$0")/lib.sh"
 require_slug "${1:-}"; require_slug "${2:-}"
 A="$1"; B="$2"
@@ -51,21 +51,21 @@ echo "AC-D3: resource limits applied"
 MEM=$(docker inspect -f '{{.HostConfig.Memory}}' "$CA")
 [ "$MEM" -gt 0 ] && pass "memory limit: $MEM bytes" || fail "no memory limit"
 
-echo "AC-D3+: Caddy Admin API недостижим из сервисных контейнеров (unix socket only)"
+echo "AC-D3+: Caddy Admin API unreachable from service containers (unix socket only)"
 if docker exec "$CA" sh -c "wget -qO- -T 3 http://botsman-caddy:2019/config/ >/dev/null 2>&1"; then
   fail "caddy admin reachable over TCP from $CA"
 else
   pass "no TCP admin listener reachable from $CA"
 fi
 
-echo "AC-D3+: control API демона отвергает запросы без токена"
+echo "AC-D3+: daemon control API rejects requests without the token"
 if docker exec "$CA" sh -c "wget -qO- -T 3 --post-data='' http://botsman-daemon:8366/hooks/push/$A >/dev/null 2>&1"; then
   fail "control API accepted an unauthenticated push trigger from a service container"
 else
   pass "unauthenticated push trigger rejected"
 fi
 
-echo "AC-D3+: контейнер агента (если сейчас работает) не видит docker-сеть проектов"
+echo "AC-D3+: agent container (if running right now) sees no botsman networks"
 AGENT_C=$(docker ps --filter "label=botsman.agent" --format '{{.Names}}' | head -1)
 if [ -n "$AGENT_C" ]; then
   NETS=$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$AGENT_C")
@@ -74,10 +74,10 @@ if [ -n "$AGENT_C" ]; then
     *) pass "agent container networks: $NETS (default bridge only)";;
   esac
 else
-  pass "no agent container running right now (запусти проверку во время генерации, чтобы покрыть)"
+  pass "no agent container running right now (run this check during a generation to cover it)"
 fi
 
-echo "AC-D1 (manual): /list в Telegram показывает оба проекта со статусами и ссылками."
-echo "AC-D4 (manual): напиши боту с другого аккаунта — должен получить отказ без какой-либо информации."
+echo "AC-D1 (manual): /list in Telegram shows both projects with statuses and links."
+echo "AC-D4 (manual): message the bot from another account — it must refuse without leaking any information."
 
 finish

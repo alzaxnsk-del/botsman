@@ -108,7 +108,7 @@ describe('Orchestrator pipeline', () => {
 
     const o = await orch.enqueue('create', 'сервис с секретом', () => {});
     expect(o.ok).toBe(false);
-    expect(o.error).toContain('секрет');
+    expect(o.error).toContain('secrets');
     expect(engine.deploys).toHaveLength(0);
     expect(store.getProject(o.slug)?.status).toBe('failed');
   });
@@ -135,7 +135,7 @@ describe('Orchestrator pipeline', () => {
     failNext = true;
     const edited = await orch.enqueue('edit', 'сломай сборку', () => {}, created.slug);
     expect(edited.ok).toBe(false);
-    expect(edited.error).toContain('Рабочая версия не тронута');
+    expect(edited.error).toContain('live version is untouched');
 
     const after = store.getProject(created.slug)!;
     expect(after.status).toBe('live');

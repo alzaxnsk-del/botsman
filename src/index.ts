@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   }
 
   if (!configExists()) {
-    console.error(`Конфиг не найден (${paths.configFile()}). Сначала запусти: botsman setup`);
+    console.error(`Config not found (${paths.configFile()}). Run "botsman setup" first.`);
     process.exit(1);
   }
 
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
 
   const pre = await preflight(config, docker, caddy, agentImage);
   if (pre.fatal.length) {
-    console.error('Запуск невозможен:\n  - ' + pre.fatal.join('\n  - '));
+    console.error('Cannot start:\n  - ' + pre.fatal.join('\n  - '));
     process.exit(1);
   }
 
@@ -118,10 +118,10 @@ async function main(): Promise<void> {
   await gateway.start();
 
   if (pre.warnings.length) {
-    await gateway.notifyOwner('⚠️ Botsman запустился с предупреждениями:\n- ' + pre.warnings.join('\n- '));
+    await gateway.notifyOwner('⚠️ Botsman started with warnings:\n- ' + pre.warnings.join('\n- '));
   }
   if (reconcileNotes.length) {
-    await gateway.notifyOwner('ℹ️ После перезапуска привёл состояние в порядок:\n- ' + reconcileNotes.join('\n- '));
+    await gateway.notifyOwner('ℹ️ Cleaned up state after a restart:\n- ' + reconcileNotes.join('\n- '));
   }
   logger.info('botsman started');
 

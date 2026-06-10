@@ -25,7 +25,7 @@ export async function preflight(
   try {
     await docker.ping();
   } catch (e) {
-    fatal.push(`Docker недоступен (${(e as Error).message}). Проверь, что docker-сокет проброшен в контейнер.`);
+    fatal.push(`Docker is unreachable (${(e as Error).message}). Check that the docker socket is mounted into the container.`);
   }
 
   if (agentImage && fatal.length === 0) {
@@ -33,19 +33,19 @@ export async function preflight(
       await docker.getImage(agentImage).inspect();
     } catch {
       warnings.push(
-        `Образ для кодящего агента «${agentImage}» не найден — выполни docker compose build, иначе генерация кода не запустится.`,
+        `Coding agent image "${agentImage}" not found — run docker compose build, otherwise code generation will not start.`,
       );
     }
   }
 
   const tg = await checkTelegramToken(config.telegramBotToken);
-  if (!tg.ok) fatal.push(`Telegram bot token не работает: ${tg.error}`);
+  if (!tg.ok) fatal.push(`Telegram bot token does not work: ${tg.error}`);
 
   const claude = await checkAnthropicKey(config.anthropicApiKey);
-  if (!claude.ok) fatal.push(`Anthropic API key не работает: ${claude.error}`);
+  if (!claude.ok) fatal.push(`Anthropic API key does not work: ${claude.error}`);
 
   if (!(await caddy.ping())) {
-    warnings.push('Caddy Admin API недоступен — деплой не сможет публиковать маршруты, пока Caddy не поднимется.');
+    warnings.push('Caddy Admin API is unreachable — deploys cannot publish routes until Caddy is up.');
   }
 
   const probe = `botsman-dns-probe.${config.baseDomain}`;
@@ -53,7 +53,7 @@ export async function preflight(
     await dns.lookup(probe);
   } catch {
     warnings.push(
-      `DNS: ${probe} не резолвится. Нужна wildcard-запись *.${config.baseDomain} → IP этого сервера, иначе ссылки и TLS не заработают.`,
+      `DNS: ${probe} does not resolve. A wildcard record *.${config.baseDomain} → this server's IP is required, otherwise links and TLS will not work.`,
     );
   }
 
@@ -91,7 +91,7 @@ export async function checkAnthropicKey(key: string): Promise<{ ok: boolean; err
       signal: AbortSignal.timeout(15_000),
     });
     if (res.status === 401 || res.status === 403) {
-      return { ok: false, error: 'ключ отклонён (401/403) — проверь, что это валидный ключ sk-ant-…' };
+      return { ok: false, error: 'key rejected (401/403) — make sure it is a valid sk-ant-… key' };
     }
     return { ok: true };
   } catch (e) {

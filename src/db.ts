@@ -167,7 +167,7 @@ export class Store {
   /** Startup reconciliation: tasks interrupted by a daemon restart must not look in-flight forever. */
   failInterruptedTasks(): number {
     const info = this.db.prepare(`
-      UPDATE tasks SET status='failed', error='Прерван перезапуском демона', finished_at=?
+      UPDATE tasks SET status='failed', error='Interrupted by a daemon restart', finished_at=?
       WHERE status IN ('queued', 'running')
     `).run(new Date().toISOString());
     return info.changes;

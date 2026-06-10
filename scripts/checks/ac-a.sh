@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# AC-A: установка. Run on the VPS after install.sh.
-#   AC-A1 — система поднята одним скриптом (проверяем результат)
-#   AC-A2 — переживает reboot: запусти `reboot`, подожди 2 минуты и запусти
-#           этот скрипт снова — он должен пройти.
-#   AC-A3 — мастер с невалидным ключом: см. интерактивный шаг внизу.
+# AC-A: installation. Run on the VPS after install.sh.
+#   AC-A1 — the system came up from a single script (we verify the result)
+#   AC-A2 — survives a reboot: run `reboot`, wait 2 minutes and run
+#           this script again — it must pass.
+#   AC-A3 — wizard with an invalid key: see the interactive step below.
 . "$(dirname "$0")/lib.sh"
 
 echo "AC-A1: daemon, caddy, postgres are up"
@@ -38,6 +38,6 @@ done
 systemctl is-enabled docker >/dev/null 2>&1 && pass "docker enabled at boot" || fail "docker not enabled at boot"
 
 echo "AC-A3 (manual): run 'docker compose run --rm --no-deps botsman setup' with an"
-echo "  invalid Anthropic key — expect a clear russian error and exit code 1, no traceback."
+echo "  invalid Anthropic key — expect a clear error and exit code 1, no traceback."
 
 finish
