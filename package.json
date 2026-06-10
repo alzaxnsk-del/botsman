@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Self-hosted chat-to-deploy layer: describe a web service in Telegram, get it deployed on your VPS with HTTPS",
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Alec Zakhary",
   "repository": {
     "type": "git",

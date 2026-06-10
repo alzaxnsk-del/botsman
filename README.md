@@ -1,167 +1,136 @@
 # Botsman
 
-Самоустанавливающийся слой на твоём VPS: описываешь веб-сервис в Telegram — через несколько минут получаешь рабочую ссылку с HTTPS. Правки — тем же чатом. Код генерирует Claude Code (твой собственный ключ Anthropic, BYO-key — токены не проксируются и не перепродаются).
+**Describe a web service in a chat message. Botsman builds it, deploys it to your own server with a real domain and HTTPS, and sends you back a working link.**
+
+Botsman runs on your VPS. You talk to it from Telegram (or push code from your laptop). A coding agent writes the service, Botsman containerizes it, gives it a subdomain with automatic TLS, runs a smoke check, and replies with a link and a screenshot. Want a change? Just say so in the chat. Your code, your server, your API key — nothing is resold or locked in.
+
+> ⚠️ **Early stage.** Botsman is in active early development. Expect rough edges, breaking changes, and missing features. Do **not** run it on a server hosting anything you can't afford to lose. See [Security](#security) before installing.
+
+---
+
+## Why
+
+Vibe-coding tools made *building* software trivial. But they made *owning* it expensive: subscriptions that scale with your codebase, vendor lock-in, and code that lives on someone else's platform.
+
+The alternative — your own server with Coolify/Dokploy + GitHub + a local coding agent — is cheap and free, but every new project is 40–90 minutes of plumbing (repo, env, database, domain, SSL, deploy pipeline), and the iteration loop is split across three tools.
+
+Botsman is the missing piece: the magic of "a sentence becomes a deployed service," on infrastructure you control, at the cost of the compute you actually use.
+
+---
+
+## How it works
 
 ```
-Ты:      «сделай TODO-сервис со списком задач и возможностью отмечать выполненные»
-Botsman: ✓ todo-spisok-zadach.apps.example.com — задеплоен
-         [ссылка] [скриншот]
-         Что поправить?
-Ты:      «добавь тёмную тему»
-Botsman: ✓ Обновил, ссылка та же.
+You (Telegram):
+  "Build a service: a form where I paste a product URL, it checks the
+   price hourly and pings me on Telegram if it drops."
+
+Botsman (a few minutes later):
+  ✓ price-watcher.apps.yourdomain.com — deployed
+  ✓ Database created
+  ✓ Checks passed
+  [link]  [screenshot of the running page]
+  What would you like to change?
+
+You: "add a dark theme and a page listing everything I'm tracking"
+Botsman: ✓ Updated. Same link.
 ```
 
-> **Статус: альфа (MVP).** Ядро покрыто юнит- и интеграционными тестами (оркестрация, git-пайплайн, изоляция control API), но полный end-to-end прогон на чистом VPS — установка → генерация → деплой → TLS — ещё не выполнялся. Для проверки на своём сервере есть скрипты приёмки в `scripts/checks/`. Не доверяйте боту ничего критичного.
+Under the hood:
 
-## Требования
+1. **Telegram gateway** receives your message (only from your whitelisted account).
+2. **Orchestrator** creates a git repo for the project and runs a **coding agent** to generate the code.
+3. **Deploy engine** builds a container, routes `<project>.<your-domain>` through a reverse proxy with automatic Let's Encrypt TLS, and runs a smoke check.
+4. You get a link and a screenshot. Every change is a new commit; you can `git clone`, edit on your laptop, and `git push` to redeploy.
 
-- VPS с Ubuntu 22.04 или 24.04 (минимум 2 vCPU / 4 GB RAM, рекомендуется 40+ GB диска).
-- Домен с **wildcard DNS-записью**: `*.apps.example.com → IP сервера` (A-запись). Без неё ссылки и TLS не заработают.
-- Telegram-бот: создай у [@BotFather](https://t.me/BotFather), получи токен.
-- Твой Telegram user ID: узнай у [@userinfobot](https://t.me/userinfobot).
-- Anthropic API key (`sk-ant-…`): [console.anthropic.com](https://console.anthropic.com).
-- Открытые порты 80 и 443.
+---
 
-## Установка
+## Key ideas
+
+- **Your server, your code.** Everything runs on your VPS. Each project is a plain git repo on disk — clone it, edit it in any IDE, push to redeploy. Leaving Botsman is one `git clone` away (which is exactly why you won't need to).
+- **Bring your own key.** Botsman never proxies or resells LLM tokens. You plug in your own API key (or subscription). Your bill for intelligence stays yours and transparent.
+- **Phone and laptop are equal doors.** Sketch a service from Telegram on your commute, finish it by hand in your editor in the evening — same project, no migration.
+- **Boring, predictable deploys.** One supported service stack, containerized, with health checks and one-command rollback. Magic where it helps, predictability where it matters.
+
+---
+
+## Requirements
+
+- A Linux VPS (Ubuntu 22.04 or 24.04), 2 vCPU / 4 GB RAM is a comfortable starting point.
+- A domain with a **wildcard DNS record** pointing at your server, e.g. `*.apps.yourdomain.com → <your server IP>`.
+- A Telegram bot token (from [@BotFather](https://t.me/BotFather)) and your Telegram user ID.
+- An API key for the coding agent.
+
+---
+
+## Quick start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
 ```
 
-Скрипт за один проход (AC-A1):
-1. Ставит Docker, если его нет, и включает автозапуск (переживает reboot).
-2. Клонирует репозиторий в `/opt/botsman` и собирает образ.
-3. Запускает интерактивный мастер: токен бота → твой Telegram ID → ключ Anthropic → базовый домен → согласие на телеметрию (по умолчанию **выключена**). Токены проверяются живыми запросами; с невалидным ключом мастер завершается понятной ошибкой, а не трейсбэком.
-4. Поднимает `docker compose`: демон + Caddy (автоматический Let's Encrypt) + Postgres.
+The installer sets up Docker (if needed), starts the Botsman daemon and reverse proxy, and walks you through a short setup wizard (bot token, your Telegram ID, API key, base domain). Once it's running, message your bot `/start`.
 
-Конфиг сохраняется в `~/.botsman/config.json` с правами `600`. Перезапустить мастер: `cd /opt/botsman && docker compose run --rm --no-deps botsman setup && docker compose up -d`.
+Full setup, including the DNS wildcard record, is in [docs/install.md](docs/install.md). Полная операционная документация на русском — [docs/README.ru.md](docs/README.ru.md).
 
-## Использование
+---
 
-Напиши боту свободным текстом, какой сервис нужен — он создаст проект (имя-slug подбирает быстрая модель, с эвристическим фолбэком), сгенерирует код, задеплоит и пришлёт ссылку со скриншотом и стоимостью токенов. Правила определения намерения: упомянут slug → правка этого проекта; явное «сделай/новый сервис…» → новый; иначе сообщение считается правкой последнего проекта, с которым шла работа (как в диалоге выше); и только без всякого контекста бот переспросит одной кнопкой.
+## Commands
 
-Команды:
-
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `/start` | приветствие и инструкция |
-| `/list` | все проекты со статусами и ссылками |
-| `/status <slug>` | статус, история коммитов, git-URL для клонирования |
-| `/logs <slug>` | последние строки логов контейнера |
-| `/rollback <slug>` | откат на предыдущую рабочую версию |
-| `/delete <slug>` | удаление (с подтверждением вторым сообщением) |
+| `/start` | Intro and a quick how-to |
+| *(free text)* | Create a new service, or change the one you're working on |
+| `/list` | All your projects with status and links |
+| `/status <project>` | Status, link, and the git clone URL |
+| `/logs <project>` | Recent logs from the service |
+| `/rollback <project>` | Roll back to the previous working version |
+| `/delete <project>` | Stop and remove a project (asks for confirmation) |
 
-Бот обслуживает **только** whitelisted Telegram ID из конфига; остальным — отказ без какой-либо информации.
+---
 
-### Работа с компа (push-to-deploy)
+## Security
 
-`/status <slug>` показывает git-URL. Дальше:
+Botsman gives a coding agent the ability to run code and deploy services on your server. Take that seriously.
 
-```bash
-git clone ssh://user@server/home/user/.botsman/repos/<slug>.git
-# правишь код, коммитишь
-git push   # автоматически передеплоит; результат придёт в Telegram
-```
+**What Botsman does to contain it:**
+- Each deployed service runs in its own container, as a non-root user, with resource limits, on its own network.
+- The coding agent only writes inside its own project directory. It has no access to other projects or to Botsman's config.
+- Your API keys and tokens live only in a config file (`chmod 600`) and in process memory. They are never mounted into containers, never sent to the agent, and never committed to git.
+- The Telegram gateway only responds to your whitelisted account.
+- Destructive actions require explicit confirmation.
 
-Коммиты агента в истории имеют префикс `botsman:`, ручные — без префикса.
+**What you should do:**
+- Run Botsman on a dedicated server, not alongside production systems or sensitive data — especially during early development.
+- Keep your config file and server access locked down.
+- Review what gets deployed before pointing real users at it.
 
-## Конфигурация (`~/.botsman/config.json`)
+**Reporting a vulnerability:** please report security issues privately via [SECURITY.md](SECURITY.md) rather than opening a public issue. Responsible disclosure is appreciated and credited.
 
-| Ключ | Обязателен | Описание |
-|---|---|---|
-| `telegramBotToken` | да | токен от @BotFather |
-| `ownerIds` | да | массив Telegram user ID владельца |
-| `anthropicApiKey` | да | ключ Anthropic (BYO-key) |
-| `baseDomain` | да | базовый домен, например `apps.example.com` |
-| `telemetry.enabled` | нет | анонимная телеметрия, **по умолчанию `false`** |
-| `telemetry.endpoint` | нет | куда слать события; **без него события никуда не отправляются**, даже при `enabled: true` |
-| `agent.maxTurns` | нет | лимит итераций агента на задачу (по умолчанию 60) |
-| `agent.timeoutMs` | нет | жёсткий таймаут работы агента над задачей (по умолчанию 720000 = 12 мин) |
-| `agent.model` | нет | модель Claude (по умолчанию — дефолт Claude Code) |
-| `agent.image` | нет | docker-образ для контейнера агента (по умолчанию `botsman`) |
-| `docker.socketPath` | нет | путь к docker-сокету (по умолчанию `/var/run/docker.sock`) |
-| `caddyAdminUrl` | нет | Admin API Caddy (по умолчанию unix-сокет `unix:/run/caddy/admin.sock`) |
+This is an early project and has not yet had an external security audit. Treat it accordingly.
 
-Переменные окружения compose (`/opt/botsman/.env`): `BOTSMAN_PG_PASSWORD` (пароль суперпользователя Postgres, генерируется установщиком), `BOTSMAN_HOME` (директория состояния на хосте).
+---
 
-### Телеметрия
+## Roadmap
 
-Строго opt-in: вопрос задаётся один раз при установке, по умолчанию — выключена. Даже при согласии **никакого зашитого endpoint нет**: пока в конфиге не указан `telemetry.endpoint`, события только пишутся в локальный лог и SQLite (`kv`-ключи `installed_at`, `last_activity` и маркеры первого деплоя) — с сервера ничего не уходит. Если endpoint задан, отправляются только три события без какого-либо содержимого проектов, кода или промптов: факт установки, факт первого успешного деплоя, факт активности спустя ≥7 дней. Отключить: `"telemetry": { "enabled": false }` в `~/.botsman/config.json` и `docker compose restart botsman`.
+Botsman is open-core. The single-user core in this repository is, and will remain, free and open source under Apache 2.0.
 
-## Поддерживаемый стек генерируемых сервисов
+- **Now:** single-user core — chat → deploy on your own server, one supported service stack, git-based iteration and rollback.
+- **Next:** more service stacks, web chat alongside Telegram, preview environments, better monitoring.
+- **Later (separate, commercial modules — not in this repo):** team features for people who run *many* projects — project isolation across clients, roles and deploy approvals, audit logs, per-client billing, and white-label client access. These are aimed at studios and agencies and are how the project sustains itself. The core never depends on them.
 
-Один, намеренно (надёжный деплой важнее разнообразия):
+If you only ever use the open core, it stays fully functional forever.
 
-- Node.js (LTS) + Express/Fastify;
-- PostgreSQL (конфиг строго из env: `DATABASE_URL`, `PG*`);
-- HTML с сервера или статика из того же процесса;
-- сервис слушает `process.env.PORT`, `GET /` отвечает 200;
-- Dockerfile на `node:22-alpine` (если агент не создал — подставляется шаблон, тогда должен работать `npm start`);
-- миграции: либо идемпотентный bootstrap таблиц в коде, либо `npm run migrate` (выполняется перед стартом; провал миграции = провал деплоя).
+---
 
-## Архитектура
+## Contributing
 
-Один демон (TypeScript/Node) + изолированные контейнеры сервисов:
+Contributions, issues, and ideas are welcome. Because Botsman runs untrusted-ish generated code on people's servers, changes touching execution, isolation, or secrets handling get extra scrutiny — please open an issue to discuss before large PRs in those areas. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- **Bot Gateway** — Telegram long polling (публичный IP для webhook не нужен), whitelist владельца.
-- **Orchestrator** — очередь задач (строго по одной), жизненный цикл: рабочая директория → кодящий агент → secret-scan → git commit → деплой → ответ. Состояние в SQLite (`~/.botsman/botsman.db`).
-- **Coding Agent Runner** — headless Claude Code в **одноразовом изолированном контейнере**: внутрь монтируется только директория проекта; ни docker-сокета, ни конфига Botsman, ни доступа к сетям проектов/Caddy/Postgres (обычный bridge — только выход в интернет для API и npm). Интерфейс `CodingAgent` позволяет подменить реализацию. Жёсткие лимиты: max-turns + таймаут + 1 CPU / 2 GB на контейнер. Стоимость токенов за задачу показывается в ответе бота.
-- **Project Store** — `~/.botsman/projects/<slug>/` (git, каждое изменение — коммит) + bare-репозитории в `~/.botsman/repos/` для push-to-deploy.
-- **Deploy Engine** — docker build (тег `botsman/<slug>:<commit>`, сборка с лимитами CPU/RAM) → контейнер → маршрут в Caddy через Admin API → Let's Encrypt автоматически → smoke-check (HTTP 200) → проверка публичного URL (если DNS/TLS ещё не готовы — предупреждение в Telegram, не провал) → скриншот (Playwright). Новая версия поднимается рядом со старой; маршрут переключается только после успешного smoke-check — упавший деплой не задевает работающую версию. Предыдущий образ хранится для `/rollback`; более старые образы автоматически удаляются (GC), чтобы не съесть диск.
-- **Reverse Proxy** — Caddy, единая точка входа 80/443.
+---
 
-### Принятые решения (отклонения и уточнения к умолчаниям ТЗ)
+## License
 
-- **Postgres: один общий контейнер** (`botsman-postgres`), отдельная база + роль на проект — выбран как более простой в реализации и дешёвый по памяти на 4 GB VPS (ТЗ допускает оба варианта). Изоляция — правами: роль проекта видит только свою базу.
-- **Сети: по одной приватной docker-сети на проект.** В сеть проекта входят только его контейнер, Caddy, демон и Postgres. Сервисы разных проектов не имеют общей сети.
-- **Контейнеры сервисов**: non-root, `cap_drop: ALL`, `no-new-privileges`, лимиты 0.5 CPU / 512 MB / 256 pids, без публикации портов, без docker-сокета и без доступа к конфигу Botsman.
-- **Демон работает под UID владельца** (с доступом к docker-сокету через `group_add`) — поэтому `~/.botsman` остаётся собственностью пользователя и `git push` по SSH работает без плясок с правами. Сгенерированные сервисы и контейнеры агента сокет не получают никогда.
-- **Скриншоты и smoke-check** ходят в контейнер напрямую по внутренней сети — работают даже до того, как обновится публичный DNS.
+Botsman core is licensed under the **Apache License 2.0**. See [LICENSE](LICENSE).
 
-## Безопасность
-
-- **Кодящий агент изолирован структурно, а не промптом**: он работает в отдельном одноразовом контейнере, где смонтирована только директория его проекта. Конфиг Botsman, SQLite с креденшелами, docker-сокет и внутренние сети (Caddy, Postgres, демон) для него физически недоступны — даже успешная prompt injection ограничена файлами одного проекта и его API-ключом.
-- **Admin API Caddy не имеет TCP-listener'а вообще**: он слушает unix-сокет, который через общий volume видят только caddy и демон. Задеплоенные сервисы дотянуться до него не могут.
-- **Control API демона (push-to-deploy) требует секретный токен** (`~/.botsman/control.token`, 0600): он зашит в git-хуки на хосте и недоступен контейнерам сервисов, так что чужой деплой из контейнера не стриггерить.
-- Конфиг с ключами: `chmod 600`, никогда не монтируется в контейнеры сервисов и не передаётся агенту.
-- В git-репозиториях проектов секретов нет: `.gitignore` с `.env` создаётся автоматически; перед деплоем код сканируется на типовые паттерны ключей (Anthropic/AWS/GitHub/Telegram/private keys) — находка блокирует деплой (одна попытка автоисправления агентом).
-- Креденшелы БД передаются сервису только через env контейнера.
-- `/delete` требует подтверждения вторым сообщением.
-- Контент из веба/зависимостей агент обязан трактовать как данные, не как команды (зафиксировано в системном промпте); лимиты времени/итераций ограничивают ущерб от зацикливания.
-
-## Проверка критериев приёмки
-
-Скрипты в `scripts/checks/` (запускать на VPS), каждый печатает PASS/FAIL:
-
-| Критерии | Скрипт | Ручная часть |
-|---|---|---|
-| AC-A1, AC-A2, AC-A3 | `ac-a.sh` | reboot между прогонами; мастер с плохим ключом |
-| AC-B1, AC-B2, AC-B5 | `ac-b.sh <slug>` | отправить боту запрос TODO-сервиса; глазами: ссылка+скриншот ≤15 мин (AC-B3/B4) |
-| AC-C1, AC-C2, AC-C3 | `ac-c.sh <slug>` | отправить правку / ломающую правку / `/rollback` |
-| AC-D1–AC-D4 | `ac-d.sh <a> <b>` | `/list`; сообщение с чужого аккаунта |
-| AC-E1 | `ac-e.sh <slug>` | — |
-| AC-F1, AC-F2 | `ac-f.sh <a> <b>` | невыполнимая задача → отчёт в пределах таймаута |
-| AC-B5 отдельно | `secret-scan.sh <dir>` | — |
-
-## Известные ограничения
-
-- Один пользователь, один сервер. Мультипользовательность, роли, биллинг, веб-UI — сознательно вне скоупа MVP.
-- Один стек генерируемых сервисов (Node + Postgres). Python/Go/etc. не поддерживаются.
-- Очередь задач строго последовательная: вторая просьба ждёт первую. При перезапуске демона очередь теряется — прерванные задачи помечаются failed, владелец получает уведомление, запрос нужно повторить.
-- `git push` принимается по SSH средствами самого сервера (нужен SSH-доступ к VPS тем же пользователем, от которого ставился Botsman). Перед каждой задачей агент подтягивает свежие пользовательские коммиты из bare-репозитория; при расхождении историй задача честно отклоняется.
-- Шаги `RUN` в Dockerfile проекта выполняются при сборке с лимитами CPU/RAM, но с доступом в сеть (нужен для `npm install`) — это неустранимый для docker build вектор, не давайте боту собирать заведомо недоверенный код.
-- Telegram-вложения (фото/файлы) в инструкциях не обрабатываются — только текст.
-- Откат хранит одну предыдущую версию (предыдущий образ), не произвольную глубину.
-- Wildcard-сертификат не используется: каждый поддомен получает собственный сертификат Let's Encrypt при первом деплое (есть rate-limits LE — десятки проектов в неделю, не тысячи).
-- Бэкапы `~/.botsman` и базы Postgres — на совести владельца (обычный том на диске VPS).
-
-## Разработка
-
-```bash
-npm install
-npm run typecheck   # tsc --noEmit
-npm test            # vitest: unit-тесты slug/intent/config/secret-scan/store/caddy
-npm run dev         # локальный запуск (нужен docker-сокет и конфиг)
-```
-
-Эталонный сервис для проверки деплой-вертикали без агента: `examples/todo/` (Express + Postgres, соблюдает контракт деплоя).
+In short: use it, modify it, run it, build on it — including commercially — with a standard patent grant for peace of mind. Future commercial team/agency modules are distributed separately under their own license and are not part of this repository.
