@@ -10,9 +10,22 @@ You need:
 1. **A VPS** — Ubuntu 22.04 or 24.04, 2 vCPU / 4 GB RAM, 40+ GB disk, ports 80
    and 443 open.
 2. **A wildcard DNS record.** Pick a base domain for your services, e.g.
-   `apps.example.com`, and create an A-record `*.apps.example.com → <server IP>`
-   at your DNS provider. Without it links and TLS will not work. Verify:
-   `dig anything.apps.example.com` should return your server IP.
+   `apps.example.com`. In your DNS provider's control panel create one record:
+
+   | Type | Host / Name | Value |
+   |---|---|---|
+   | A | `*.apps` (or `*` if the whole domain is for Botsman) | `<your server's public IP>` |
+
+   This makes *every* subdomain (`todo.apps.example.com`,
+   `price-watcher.apps.example.com`, …) resolve to your server, so each
+   deployed project gets its own address with no extra DNS work. Without it
+   links and TLS will not work. Verify (may take a few minutes to propagate):
+
+   ```bash
+   dig +short anything.apps.example.com   # → your server IP
+   ```
+
+   The setup wizard also checks the record and warns if it does not resolve.
 3. **A Telegram bot token** — create a bot with [@BotFather](https://t.me/BotFather).
 4. **Your Telegram user ID** — ask [@userinfobot](https://t.me/userinfobot).
 5. **Coding agent auth** — pick one (bring-your-own: Botsman never proxies or resells tokens):
