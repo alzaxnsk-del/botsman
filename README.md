@@ -11,6 +11,8 @@ Botsman: ✓ todo-spisok-zadach.apps.example.com — задеплоен
 Botsman: ✓ Обновил, ссылка та же.
 ```
 
+> **Статус: альфа (MVP).** Ядро покрыто юнит- и интеграционными тестами (оркестрация, git-пайплайн, изоляция control API), но полный end-to-end прогон на чистом VPS — установка → генерация → деплой → TLS — ещё не выполнялся. Для проверки на своём сервере есть скрипты приёмки в `scripts/checks/`. Не доверяйте боту ничего критичного.
+
 ## Требования
 
 - VPS с Ubuntu 22.04 или 24.04 (минимум 2 vCPU / 4 GB RAM, рекомендуется 40+ GB диска).
@@ -23,7 +25,7 @@ Botsman: ✓ Обновил, ссылка та же.
 ## Установка
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<you>/botsman/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
 ```
 
 Скрипт за один проход (AC-A1):
