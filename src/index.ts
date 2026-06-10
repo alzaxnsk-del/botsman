@@ -83,6 +83,7 @@ async function main(): Promise<void> {
   const agent = new ClaudeCodeAgent({
     docker,
     apiKey: config.anthropicApiKey,
+    oauthToken: config.claudeCodeOauthToken,
     image: agentImage,
     hostProjectsDir,
     maxTurns: config.agent?.maxTurns,
@@ -103,9 +104,12 @@ async function main(): Promise<void> {
 
   const deployEngine = new DockerDeployEngine(docker, caddy, config.baseDomain);
   const controlUrl = process.env.BOTSMAN_CONTROL_URL ?? `http://127.0.0.1:${CONTROL_PORT}`;
+  // LLM-based slug naming needs the Messages API — with subscription-only
+  // auth we fall back to the transliteration heuristic.
+  const apiKey = config.anthropicApiKey;
   const orchestrator = new Orchestrator(
     store, agent, deployEngine, pgAdmin, config.baseDomain, controlUrl, controlToken, telemetry,
-    (description) => suggestSlugLLM(config.anthropicApiKey, description),
+    apiKey ? (description) => suggestSlugLLM(apiKey, description) : undefined,
   );
 
   const reconcileNotes = await orchestrator.reconcileOnStartup(docker);

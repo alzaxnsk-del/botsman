@@ -15,8 +15,13 @@ You need:
    `dig anything.apps.example.com` should return your server IP.
 3. **A Telegram bot token** — create a bot with [@BotFather](https://t.me/BotFather).
 4. **Your Telegram user ID** — ask [@userinfobot](https://t.me/userinfobot).
-5. **An Anthropic API key** (`sk-ant-…`) from [console.anthropic.com](https://console.anthropic.com).
-   Bring-your-own-key: Botsman never proxies or resells tokens.
+5. **Coding agent auth** — pick one (bring-your-own: Botsman never proxies or resells tokens):
+   - **Claude subscription (Pro/Max)** — no extra bills on top of the plan. On any
+     machine where you are logged into Claude Code, run `claude setup-token` and
+     keep the resulting `sk-ant-oat…` token for the wizard. Usage counts against
+     your subscription limits (5-hour windows / weekly caps).
+   - **Anthropic API key** (`sk-ant-api…`, pay-per-use) from
+     [console.anthropic.com](https://console.anthropic.com).
 
 ## Install
 
@@ -28,9 +33,10 @@ The script, in one pass:
 
 1. Installs Docker if missing and enables it at boot (survives reboots).
 2. Clones the repo into `/opt/botsman` and builds the image.
-3. Runs an interactive wizard: bot token → your Telegram ID → API key → base
-   domain → telemetry opt-in (default **off**). Tokens are validated with live
-   probes; an invalid key ends the wizard with a clear error, not a traceback.
+3. Runs an interactive wizard: bot token → your Telegram ID → agent auth
+   (subscription token or API key) → base domain → telemetry opt-in (default
+   **off**). Tokens are validated with live probes; an invalid key ends the
+   wizard with a clear error, not a traceback.
 4. Starts `docker compose`: the daemon + Caddy (automatic Let's Encrypt) +
    Postgres.
 
@@ -55,7 +61,8 @@ Edit `~/.botsman/config.json`, then `docker compose restart botsman`.
 |---|---|---|
 | `telegramBotToken` | yes | from @BotFather |
 | `ownerIds` | yes | array of whitelisted Telegram user IDs |
-| `anthropicApiKey` | yes | your API key (BYO-key) |
+| `anthropicApiKey` | one of the two | pay-per-use API key (`sk-ant-api…`) |
+| `claudeCodeOauthToken` | one of the two | Claude subscription token from `claude setup-token` (`sk-ant-oat…`); wins if both are set. Note: LLM-based slug naming needs the API key — with a subscription token a transliteration heuristic is used |
 | `baseDomain` | yes | e.g. `apps.example.com` |
 | `telemetry.enabled` | no | default `false`; see below |
 | `telemetry.endpoint` | no | without it nothing is ever sent, even if enabled |

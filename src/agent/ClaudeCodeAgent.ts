@@ -7,8 +7,10 @@ import type { AgentRunInput, AgentRunResult, CodingAgent } from './CodingAgent.j
 
 export interface ClaudeCodeAgentOptions {
   docker: Dockerode;
-  /** Anthropic API key (BYO-key from user config). */
-  apiKey: string;
+  /** Pay-per-use Anthropic API key (BYO-key). One of apiKey/oauthToken is required. */
+  apiKey?: string;
+  /** Claude subscription token from `claude setup-token` (sk-ant-oat…). */
+  oauthToken?: string;
   /** Image with the claude CLI inside; defaults to the botsman image itself. */
   image?: string;
   /** HOST path of the projects dir — docker bind mounts need host paths, not daemon paths. */
@@ -34,7 +36,11 @@ export const AGENT_LABEL = 'botsman.agent';
  * against runaway loops and token burn (AC-F2).
  */
 export class ClaudeCodeAgent implements CodingAgent {
-  constructor(private opts: ClaudeCodeAgentOptions) {}
+  constructor(private opts: ClaudeCodeAgentOptions) {
+    if (!opts.apiKey && !opts.oauthToken) {
+      throw new Error('ClaudeCodeAgent needs an apiKey or an oauthToken');
+    }
+  }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
     const started = Date.now();
@@ -76,7 +82,10 @@ export class ClaudeCodeAgent implements CodingAgent {
         WorkingDir: '/work',
         User: `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
         Env: [
-          `ANTHROPIC_API_KEY=${this.opts.apiKey}`,
+          // Subscription token wins over the API key when both are set.
+          ...(this.opts.oauthToken
+            ? [`CLAUDE_CODE_OAUTH_TOKEN=${this.opts.oauthToken}`]
+            : [`ANTHROPIC_API_KEY=${this.opts.apiKey}`]),
           'HOME=/tmp/agent-home', // ephemeral; nothing persists between runs
           'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
         ],

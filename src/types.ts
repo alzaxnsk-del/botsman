@@ -60,7 +60,14 @@ export interface BotsmanConfig {
   telegramBotToken: string;
   /** Telegram user IDs allowed to talk to the bot (the owner). */
   ownerIds: number[];
-  anthropicApiKey: string;
+  /**
+   * Coding agent auth — exactly one of the two (oauth token wins if both):
+   * anthropicApiKey: pay-per-use API key (sk-ant-api…);
+   * claudeCodeOauthToken: Claude subscription token from `claude setup-token`
+   * (sk-ant-oat…) — usage counts against the Pro/Max subscription limits.
+   */
+  anthropicApiKey?: string;
+  claudeCodeOauthToken?: string;
   /** e.g. "apps.example.com" — wildcard *.apps.example.com must point at this server. */
   baseDomain: string;
   /** Strictly opt-in anonymous telemetry. Default false. */

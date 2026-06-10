@@ -39,8 +39,18 @@ export function validateConfig(raw: unknown): BotsmanConfig {
   if (!ownerIds.length || !ownerIds.every((v) => Number.isInteger(v) && (v as number) > 0)) {
     problems.push('ownerIds: expected non-empty array of positive Telegram user IDs');
   }
-  if (typeof c.anthropicApiKey !== 'string' || c.anthropicApiKey.length < 20) {
+  const apiKey = typeof c.anthropicApiKey === 'string' ? c.anthropicApiKey : undefined;
+  const oauthToken = typeof c.claudeCodeOauthToken === 'string' ? c.claudeCodeOauthToken : undefined;
+  if (!apiKey && !oauthToken) {
+    problems.push(
+      'agent auth: set anthropicApiKey (sk-ant-api…) or claudeCodeOauthToken (sk-ant-oat…, from `claude setup-token`)',
+    );
+  }
+  if (apiKey && apiKey.length < 20) {
     problems.push('anthropicApiKey: expected an Anthropic API key (sk-ant-...)');
+  }
+  if (oauthToken && !/^sk-ant-oat/.test(oauthToken)) {
+    problems.push('claudeCodeOauthToken: expected a token from `claude setup-token` (sk-ant-oat…)');
   }
   if (typeof c.baseDomain !== 'string' || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(c.baseDomain)) {
     problems.push('baseDomain: expected a domain like "apps.example.com"');
@@ -53,7 +63,8 @@ export function validateConfig(raw: unknown): BotsmanConfig {
   return {
     telegramBotToken: c.telegramBotToken as string,
     ownerIds: ownerIds as number[],
-    anthropicApiKey: c.anthropicApiKey as string,
+    anthropicApiKey: apiKey,
+    claudeCodeOauthToken: oauthToken,
     baseDomain: (c.baseDomain as string).toLowerCase(),
     telemetry: {
       enabled: telemetryRaw.enabled === true, // strictly opt-in, default OFF
