@@ -96,7 +96,7 @@ Botsman gives a coding agent the ability to run code and deploy services on your
 **What Botsman does to contain it:**
 - Each deployed service runs in its own container, as a non-root user, with resource limits, on its own network.
 - The coding agent only writes inside its own project directory. It has no access to other projects or to Botsman's config.
-- Your API keys and tokens live only in a config file (`chmod 600`) and in process memory. They are never mounted into containers, never sent to the agent, and never committed to git.
+- Your Telegram token and Botsman's config live only in a config file (`chmod 600`) and in daemon memory — never mounted into any container, never committed to git. The LLM API key is handed only to the agent's throwaway container (it needs it to generate code) and never reaches deployed services. Per-project database credentials are injected into the service's environment only — never written into the project's git repo.
 - The Telegram gateway only responds to your whitelisted account.
 - Destructive actions require explicit confirmation.
 

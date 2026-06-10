@@ -249,6 +249,7 @@ export class DockerDeployEngine implements DeployEngine {
       Image: image,
       Cmd: ['npm', 'run', 'migrate'],
       Env: this.serviceEnv(db),
+      User: 'node',
       HostConfig: {
         NetworkMode: this.netName(slug),
         Memory: 512 * 1024 * 1024,
@@ -279,6 +280,9 @@ export class DockerDeployEngine implements DeployEngine {
       Image: image,
       Env: this.serviceEnv(db),
       Labels: { 'botsman.project': slug },
+      // Enforced non-root regardless of what the (agent-written) Dockerfile
+      // says — the stack contract mandates node:22-alpine, which has this user.
+      User: 'node',
       HostConfig: {
         NetworkMode: this.netName(slug),
         // §5: resource limits — sane defaults for a 2 vCPU / 4 GB box.
