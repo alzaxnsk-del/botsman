@@ -1,0 +1,91 @@
+# Botsman itself: daemon + Caddy + shared Postgres (§3).
+# Deployed user services are NOT here — the daemon creates their containers
+# and per-project networks dynamically via the Docker API.
+services:
+  botsman:
+    build: .
+    # Explicit tag: the daemon launches agent containers from this same image.
+    image: botsman
+    container_name: botsman-daemon
+    restart: unless-stopped
+    # Run as the HOST user so that ~/.botsman (projects, bare repos for git
+    # push) stays owned by them; docker-socket access comes via group_add.
+    # install.sh fills BOTSMAN_UID/BOTSMAN_GID/DOCKER_GID in .env.
+    user: "${BOTSMAN_UID:-0}:${BOTSMAN_GID:-0}"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+    environment:
+      BOTSMAN_HOME: /data
+      # Writable HOME for the daemon and the claude CLI (runtime UID ≠ build UID).
+      HOME: /data/home
+      AGENT_HOME: /data/home
+      BOTSMAN_PG_PASSWORD: ${BOTSMAN_PG_PASSWORD:?set in .env}
+      # Caddy Admin API over a shared unix socket: no TCP listener anywhere,
+      # so deployed services can never reach it (§5).
+      CADDY_ADMIN_URL: unix:/run/caddy/admin.sock
+      # URL baked into git post-receive hooks; must be reachable from the HOST.
+      BOTSMAN_CONTROL_URL: http://127.0.0.1:8366
+      # Host-side path of the state dir — needed to bind-mount project dirs
+      # into agent containers and shown in /status as the git clone URL.
+      BOTSMAN_HOST_DIR: ${BOTSMAN_HOME:-~/.botsman}
+    volumes:
+      # All state: config.json (0600), SQLite, projects, bare repos, logs.
+      - ${BOTSMAN_HOME:-~/.botsman}:/data
+      # Docker socket: the daemon orchestrates service containers.
+      # NEVER mounted into deployed services or agent containers (AC-D3).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Caddy admin socket (created by the caddy container).
+      - caddy_admin:/run/caddy
+    ports:
+      # Control API (push-to-deploy hooks, health) — localhost only.
+      - "127.0.0.1:8366:8366"
+    networks: [botsman]
+
+  caddy:
+    image: caddy:2.8
+    container_name: botsman-caddy
+    restart: unless-stopped
+    # --resume: routes added via the Admin API survive restarts.
+    command: caddy run --config /etc/caddy/caddy.json --resume
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/caddy.json:/etc/caddy/caddy.json:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_admin:/run/caddy
+    networks: [botsman]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: botsman-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: botsman
+      POSTGRES_PASSWORD: ${BOTSMAN_PG_PASSWORD:?set in .env}
+      POSTGRES_DB: postgres
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U botsman"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [botsman]
+    # No published ports: only containers on project networks reach Postgres.
+
+networks:
+  botsman:
+    name: botsman
+
+volumes:
+  caddy_data:
+  caddy_config:
+  caddy_admin:
+  pg_data:
