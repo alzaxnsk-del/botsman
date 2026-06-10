@@ -25,6 +25,24 @@ describe('validateConfig', () => {
     expect(() => validateConfig({ ...valid, telegramBotToken: 'nope' })).toThrow(ConfigError);
   });
 
+  it('accepts a subscription token instead of an API key', () => {
+    const { anthropicApiKey, ...rest } = valid;
+    const c = validateConfig({ ...rest, claudeCodeOauthToken: 'sk-ant-oat01-test-token-value' });
+    expect(c.claudeCodeOauthToken).toBe('sk-ant-oat01-test-token-value');
+    expect(c.anthropicApiKey).toBeUndefined();
+  });
+
+  it('requires at least one auth method', () => {
+    const { anthropicApiKey, ...rest } = valid;
+    expect(() => validateConfig(rest)).toThrow(/agent auth/);
+  });
+
+  it('rejects a malformed subscription token', () => {
+    const { anthropicApiKey, ...rest } = valid;
+    expect(() => validateConfig({ ...rest, claudeCodeOauthToken: 'sk-ant-api03-not-oauth' }))
+      .toThrow(/claudeCodeOauthToken/);
+  });
+
   it('rejects empty ownerIds', () => {
     expect(() => validateConfig({ ...valid, ownerIds: [] })).toThrow(/ownerIds/);
   });

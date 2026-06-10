@@ -2,7 +2,7 @@ import readline from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { saveConfig, validateConfig, ConfigError } from './config.js';
 import { paths } from './paths.js';
-import { checkTelegramToken, checkAnthropicKey } from './preflight.js';
+import { checkTelegramToken, checkAnthropicKey, checkClaudeOauthToken } from './preflight.js';
 
 /**
  * Interactive first-run wizard (§4 EPIC A). Validates tokens with live probes
@@ -38,17 +38,39 @@ export async function runSetupWizard(): Promise<number> {
       return 1;
     }
 
-    const anthropicApiKey = (await rl.question(
-      '3/5 Anthropic API key (sk-ant-…, console.anthropic.com): ',
-    )).trim();
-    say('    Checking the key…');
-    const an = await checkAnthropicKey(anthropicApiKey);
-    if (!an.ok) {
-      say(`    ERROR: ${an.error}`);
-      say('    Setup is not complete. Get a working key and run the wizard again: botsman setup');
+    say('3/5 How should the coding agent authenticate?');
+    say('    1) Claude subscription (Pro/Max) — no extra API bills, uses your plan limits.');
+    say('       Run `claude setup-token` on a machine where you are logged into Claude Code,');
+    say('       and paste the resulting token (sk-ant-oat…).');
+    say('    2) Anthropic API key (sk-ant-api…, pay-per-use, console.anthropic.com).');
+    const authChoice = (await rl.question('    Choose [1/2]: ')).trim();
+
+    let anthropicApiKey: string | undefined;
+    let claudeCodeOauthToken: string | undefined;
+    if (authChoice === '1') {
+      claudeCodeOauthToken = (await rl.question('    Subscription token (sk-ant-oat…): ')).trim();
+      say('    Checking the token (runs a tiny Claude Code request, ~15s)…');
+      const probe = await checkClaudeOauthToken(claudeCodeOauthToken);
+      if (!probe.ok) {
+        say(`    ERROR: the token does not work (${probe.error}).`);
+        say('    Setup is not complete. Generate a fresh token with `claude setup-token` and run the wizard again: botsman setup');
+        return 1;
+      }
+      say('    ✓ token is valid (usage will count against your subscription limits)');
+    } else if (authChoice === '2') {
+      anthropicApiKey = (await rl.question('    Anthropic API key (sk-ant-…): ')).trim();
+      say('    Checking the key…');
+      const an = await checkAnthropicKey(anthropicApiKey);
+      if (!an.ok) {
+        say(`    ERROR: ${an.error}`);
+        say('    Setup is not complete. Get a working key and run the wizard again: botsman setup');
+        return 1;
+      }
+      say('    ✓ key is valid');
+    } else {
+      say('    ERROR: expected 1 or 2. Run the wizard again: botsman setup');
       return 1;
     }
-    say('    ✓ key is valid');
 
     const baseDomain = (await rl.question(
       '4/5 Base domain for your services (e.g. apps.example.com;\n    requires a wildcard DNS record *.apps.example.com → this server\'s IP): ',
@@ -63,6 +85,7 @@ export async function runSetupWizard(): Promise<number> {
       telegramBotToken,
       ownerIds: [ownerId],
       anthropicApiKey,
+      claudeCodeOauthToken,
       baseDomain,
       telemetry: { enabled: telemetryEnabled },
     });
