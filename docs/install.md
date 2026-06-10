@@ -80,7 +80,7 @@ Edit `~/.botsman/config.json`, then `docker compose restart botsman`.
 | `telegramBotToken` | yes | from @BotFather |
 | `ownerIds` | yes | array of whitelisted Telegram user IDs |
 | `anthropicApiKey` | one of the two | pay-per-use API key (`sk-ant-api…`) |
-| `claudeCodeOauthToken` | one of the two | Claude subscription token from `claude setup-token` (`sk-ant-oat…`); wins if both are set. Note: LLM-based slug naming needs the API key — with a subscription token a transliteration heuristic is used |
+| `claudeCodeOauthToken` | one of the two | Claude subscription token from `claude setup-token` (`sk-ant-oat…`); wins if both are set |
 | `baseDomain` | yes | e.g. `apps.example.com` |
 | `telemetry.enabled` | no | default `false`; see below |
 | `telemetry.endpoint` | no | without it nothing is ever sent, even if enabled |

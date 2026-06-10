@@ -74,7 +74,7 @@ git push   # автоматически передеплоит; результа
 | `telegramBotToken` | да | токен от @BotFather |
 | `ownerIds` | да | массив Telegram user ID владельца |
 | `anthropicApiKey` | одно из двух | API-ключ Anthropic (оплата за использование) |
-| `claudeCodeOauthToken` | одно из двух | токен подписки Claude из `claude setup-token` (`sk-ant-oat…`); при обоих заданных приоритет у него. LLM-нейминг слагов работает только с API-ключом — с подпиской используется эвристика |
+| `claudeCodeOauthToken` | одно из двух | токен подписки Claude из `claude setup-token` (`sk-ant-oat…`); при обоих заданных приоритет у него |
 | `baseDomain` | да | базовый домен, например `apps.example.com` |
 | `telemetry.enabled` | нет | анонимная телеметрия, **по умолчанию `false`** |
 | `telemetry.endpoint` | нет | куда слать события; **без него события никуда не отправляются**, даже при `enabled: true` |
