@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# AC-E1: push-to-deploy. Запускать на VPS. Usage: ./ac-e.sh <slug>
+# AC-E1: push-to-deploy. Run on the VPS. Usage: ./ac-e.sh <slug>
 . "$(dirname "$0")/lib.sh"
 require_slug "${1:-}"
 SLUG="$1"

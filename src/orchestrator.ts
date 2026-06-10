@@ -136,7 +136,7 @@ export class Orchestrator {
       report('committing');
       const commit = await commitAll(slug, description);
       if (!commit) {
-        const err = 'Агент не создал ни одного файла. Попробуйте переформулировать запрос.';
+        const err = 'The agent did not create any files. Try rephrasing the request.';
         this.store.setStatus(slug, 'failed');
         this.store.finishTask(task.id, 'failed', undefined, err);
         return { ok: false, slug, error: err, costUsd: gen.costUsd };
@@ -167,7 +167,7 @@ export class Orchestrator {
 
   private async editProject(slug: string, instruction: string, report: StageReporter): Promise<TaskOutcome> {
     const project = this.store.getProject(slug);
-    if (!project) return { ok: false, slug, error: `Проект ${slug} не найден.` };
+    if (!project) return { ok: false, slug, error: `Project ${slug} not found.` };
     const task = this.store.createTask(slug, 'edit', instruction);
     report('accepted', slug);
 
@@ -176,8 +176,8 @@ export class Orchestrator {
     const sync = await syncFromBareIfAhead(slug).catch(() => 'none' as const);
     if (sync === 'diverged') {
       const err =
-        'История git разошлась: в репозитории есть и ваши, и мои коммиты, которых нет друг у друга. ' +
-        'Сделайте git pull/rebase и git push в проектный репозиторий, потом повторите запрос.';
+        'Git history has diverged: the repo has both your commits and mine that the other side is missing. ' +
+        'Run git pull/rebase and git push in the project repo, then retry.';
       this.store.finishTask(task.id, 'failed', undefined, err);
       return { ok: false, slug, error: err };
     }
@@ -196,10 +196,10 @@ export class Orchestrator {
       report('committing');
       const commit = await commitAll(slug, instruction);
       if (!commit) {
-        this.store.finishTask(task.id, 'done', gen.summary ?? 'Изменений не потребовалось.');
+        this.store.finishTask(task.id, 'done', gen.summary ?? 'No changes were needed.');
         return {
           ok: true, slug, url: `https://${project.domain}/`,
-          summary: gen.summary ?? 'Агент не внёс изменений.', costUsd: gen.costUsd,
+          summary: gen.summary ?? 'The agent made no changes.', costUsd: gen.costUsd,
         };
       }
       await syncToBare(slug);
@@ -212,7 +212,7 @@ export class Orchestrator {
         this.store.finishTask(task.id, 'failed', gen.summary, deployed.error);
         return {
           ok: false, slug, summary: gen.summary, costUsd: gen.costUsd,
-          error: `${deployed.error}\n\nРабочая версия не тронута и продолжает отвечать.`,
+          error: `${deployed.error}\n\nThe live version is untouched and still serving.`,
         };
       }
       this.store.finishTask(task.id, 'done', gen.summary);
@@ -231,7 +231,7 @@ export class Orchestrator {
 
   private async rollbackProject(slug: string, report: StageReporter): Promise<TaskOutcome> {
     const project = this.store.getProject(slug);
-    if (!project) return { ok: false, slug, error: `Проект ${slug} не найден.` };
+    if (!project) return { ok: false, slug, error: `Project ${slug} not found.` };
     const task = this.store.createTask(slug, 'rollback', 'rollback');
     const res = await this.deployEngine.rollback(project, report);
     if (!res.ok) {
@@ -248,37 +248,37 @@ export class Orchestrator {
       prevImage: project.currentImage,
     });
     this.store.finishTask(task.id, 'done', 'rolled back');
-    return { ok: true, slug, url: res.url, summary: 'Откатил на предыдущую рабочую версию.' };
+    return { ok: true, slug, url: res.url, summary: 'Rolled back to the previous working version.' };
   }
 
   // --- delete ---
 
   private async deleteProject(slug: string): Promise<TaskOutcome> {
     const project = this.store.getProject(slug);
-    if (!project) return { ok: false, slug, error: `Проект ${slug} не найден.` };
+    if (!project) return { ok: false, slug, error: `Project ${slug} not found.` };
     await this.deployEngine.remove(project);
     await this.pgAdmin.dropProjectDb(project).catch((e) =>
       logger.warn('db drop failed', { slug, error: String(e) }));
     fs.rmSync(paths.projectDir(slug), { recursive: true, force: true });
     fs.rmSync(paths.bareRepo(slug), { recursive: true, force: true });
     this.store.deleteProject(slug);
-    return { ok: true, slug, summary: `Проект ${slug} остановлен и удалён.` };
+    return { ok: true, slug, summary: `Project ${slug} stopped and removed.` };
   }
 
   // --- push-to-deploy (AC-E1) ---
 
   private async redeployFromPush(slug: string, report: StageReporter): Promise<TaskOutcome> {
     const project = this.store.getProject(slug);
-    if (!project) return { ok: false, slug, error: `Проект ${slug} не найден.` };
+    if (!project) return { ok: false, slug, error: `Project ${slug} not found.` };
     const task = this.store.createTask(slug, 'redeploy', 'git push');
     report('accepted', slug);
     try {
       const commit = await syncFromBare(slug);
-      if (!commit) throw new Error('Не удалось получить коммит из bare-репозитория.');
+      if (!commit) throw new Error('Could not read the pushed commit from the bare repository.');
       const deployed = await this.deployCommit(project, commit, report);
       this.store.finishTask(task.id, deployed.ok ? 'done' : 'failed', undefined, deployed.error);
       return deployed.ok
-        ? { ok: true, slug, url: deployed.url, screenshotPath: deployed.screenshotPath, summary: 'Передеплоил из git push.' }
+        ? { ok: true, slug, url: deployed.url, screenshotPath: deployed.screenshotPath, summary: 'Redeployed from git push.' }
         : { ok: false, slug, error: deployed.error };
     } catch (e) {
       this.store.finishTask(task.id, 'failed', undefined, (e as Error).message);
@@ -307,7 +307,7 @@ export class Orchestrator {
 
     let findings = scanForSecrets(dir);
     if (findings.length) {
-      report('generating', 'найдены захардкоженные секреты, прошу агента убрать');
+      report('generating', 'hardcoded secrets found, asking the agent to remove them');
       const fixRun = await this.agent.run({
         projectDir: dir,
         mode: 'edit',
@@ -318,14 +318,14 @@ export class Orchestrator {
       });
       costUsd += fixRun.costUsd ?? 0;
       if (!fixRun.ok) {
-        return { ok: false, error: `Секреты в коде, авто-исправление не удалось: ${fixRun.error}`, costUsd: costUsd || undefined };
+        return { ok: false, error: `Secrets in the code and the automatic fix failed: ${fixRun.error}`, costUsd: costUsd || undefined };
       }
       findings = scanForSecrets(dir);
       if (findings.length) {
         return {
           ok: false,
-          error: 'В сгенерированном коде остались захардкоженные секреты: ' +
-            findings.map((f) => f.file).join(', ') + '. Деплой отменён.',
+          error: 'Generated code still contains hardcoded secrets: ' +
+            findings.map((f) => f.file).join(', ') + '. Deploy cancelled.',
           costUsd: costUsd || undefined,
         };
       }
@@ -370,13 +370,13 @@ export class Orchestrator {
     const notes: string[] = [];
     const interrupted = this.store.failInterruptedTasks();
     if (interrupted > 0) {
-      notes.push(`задач прервано перезапуском демона: ${interrupted}`);
+      notes.push(`tasks interrupted by the restart: ${interrupted}`);
     }
     for (const p of this.store.listProjects()) {
       if (p.status === 'creating' || p.status === 'building' || p.status === 'deploying') {
         const next = p.currentImage ? 'live' : 'failed';
         this.store.setStatus(p.slug, next);
-        notes.push(`${p.slug}: статус ${p.status} → ${next}`);
+        notes.push(`${p.slug}: status ${p.status} → ${next}`);
       }
       await ensureBareRepo(p.slug, this.controlUrl, this.controlToken).catch((e) =>
         logger.warn('hook refresh failed', { slug: p.slug, error: String(e) }));
@@ -386,7 +386,7 @@ export class Orchestrator {
       for (const c of orphans) {
         await docker.getContainer(c.Id).remove({ force: true }).catch(() => {});
       }
-      if (orphans.length) notes.push(`удалено зависших контейнеров агента: ${orphans.length}`);
+      if (orphans.length) notes.push(`removed stale agent containers: ${orphans.length}`);
     } catch (e) {
       logger.warn('agent container cleanup failed', { error: String(e) });
     }
@@ -399,20 +399,20 @@ export class Orchestrator {
     const p = this.store.getProject(slug);
     if (!p) return null;
     const running = await this.deployEngine.containerRunning(slug).catch(() => false);
-    const history = await gitLog(slug, 5).catch(() => '(нет истории)');
+    const history = await gitLog(slug, 5).catch(() => '(no history)');
     // The repo path as seen on the HOST (we run in a container where it is /data/...).
     const hostHome = process.env.BOTSMAN_HOST_DIR ?? paths.home();
     const cloneUrl = `<user>@<server>:${hostHome}/repos/${slug}.git`;
     return [
-      `*${p.slug}* — ${p.status}${p.status === 'live' && !running ? ' ⚠️ контейнер не работает' : ''}`,
+      `*${p.slug}* — ${p.status}${p.status === 'live' && !running ? ' ⚠️ container is down' : ''}`,
       `URL: https://${p.domain}/`,
-      `Коммит: ${p.currentCommit?.slice(0, 8) ?? '—'}`,
-      `Создан: ${p.createdAt.slice(0, 16).replace('T', ' ')}`,
+      `Commit: ${p.currentCommit?.slice(0, 8) ?? '—'}`,
+      `Created: ${p.createdAt.slice(0, 16).replace('T', ' ')}`,
       '',
-      'Последние коммиты:',
+      'Recent commits:',
       '```', history, '```',
-      `Клонировать: \`git clone ${cloneUrl}\``,
-      'После `git push` проект передеплоится автоматически.',
+      `Clone: \`git clone ${cloneUrl}\``,
+      'A `git push` redeploys the project automatically.',
     ].join('\n');
   }
 }

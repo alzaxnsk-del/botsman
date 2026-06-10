@@ -13,49 +13,49 @@ export async function runSetupWizard(): Promise<number> {
   const say = (s: string) => stdout.write(s + '\n');
 
   say('');
-  say('=== Botsman — мастер настройки ===');
-  say(`Конфиг будет сохранён в ${paths.configFile()} (chmod 600).`);
+  say('=== Botsman setup wizard ===');
+  say(`The config will be saved to ${paths.configFile()} (chmod 600).`);
   say('');
 
   try {
     const telegramBotToken = (await rl.question(
-      '1/5 Telegram bot token (создай бота у @BotFather): ',
+      '1/5 Telegram bot token (create a bot with @BotFather): ',
     )).trim();
-    say('    Проверяю токен…');
+    say('    Checking the token…');
     const tg = await checkTelegramToken(telegramBotToken);
     if (!tg.ok) {
-      say(`    ОШИБКА: токен не работает (${tg.error}). Запусти мастер заново: botsman setup`);
+      say(`    ERROR: the token does not work (${tg.error}). Run the wizard again: botsman setup`);
       return 1;
     }
-    say('    ✓ токен валиден');
+    say('    ✓ token is valid');
 
     const ownerIdRaw = (await rl.question(
-      '2/5 Твой Telegram user ID (узнать: напиши @userinfobot): ',
+      '2/5 Your Telegram user ID (ask @userinfobot): ',
     )).trim();
     const ownerId = Number(ownerIdRaw);
     if (!Number.isInteger(ownerId) || ownerId <= 0) {
-      say('    ОШИБКА: ожидается положительное число. Запусти мастер заново: botsman setup');
+      say('    ERROR: a positive number expected. Run the wizard again: botsman setup');
       return 1;
     }
 
     const anthropicApiKey = (await rl.question(
       '3/5 Anthropic API key (sk-ant-…, console.anthropic.com): ',
     )).trim();
-    say('    Проверяю ключ…');
+    say('    Checking the key…');
     const an = await checkAnthropicKey(anthropicApiKey);
     if (!an.ok) {
-      say(`    ОШИБКА: ${an.error}`);
-      say('    Установка не завершена. Получи рабочий ключ и запусти мастер заново: botsman setup');
+      say(`    ERROR: ${an.error}`);
+      say('    Setup is not complete. Get a working key and run the wizard again: botsman setup');
       return 1;
     }
-    say('    ✓ ключ валиден');
+    say('    ✓ key is valid');
 
     const baseDomain = (await rl.question(
-      '4/5 Базовый домен для сервисов (например apps.example.com;\n    нужна DNS-запись *.apps.example.com → IP этого сервера): ',
+      '4/5 Base domain for your services (e.g. apps.example.com;\n    requires a wildcard DNS record *.apps.example.com → this server\'s IP): ',
     )).trim().toLowerCase();
 
     const telemetryAnswer = (await rl.question(
-      '5/5 Разрешить анонимную телеметрию? Только факты «установлен / первый деплой /\n    вернулся через неделю», без кода и промптов. [y/N]: ',
+      '5/5 Allow anonymous telemetry? Only lifecycle facts (installed / first deploy /\n    returned after a week), never code or prompts. [y/N]: ',
     )).trim().toLowerCase();
     const telemetryEnabled = telemetryAnswer === 'y' || telemetryAnswer === 'yes' || telemetryAnswer === 'да';
 
@@ -68,18 +68,18 @@ export async function runSetupWizard(): Promise<number> {
     });
     saveConfig(config);
     say('');
-    say(`✓ Конфиг сохранён: ${paths.configFile()}`);
-    say('✓ Телеметрия: ' + (telemetryEnabled ? 'ВКЛ (отключить: "telemetry": {"enabled": false} в конфиге)' : 'выкл'));
+    say(`✓ Config saved: ${paths.configFile()}`);
+    say('✓ Telemetry: ' + (telemetryEnabled ? 'ON (disable with "telemetry": {"enabled": false} in the config)' : 'off'));
     say('');
-    say('Дальше: запусти демон (или он стартует сам, если установка шла через install.sh):');
+    say('Next: start the daemon (it starts automatically when installed via install.sh):');
     say('  docker compose up -d');
     return 0;
   } catch (e) {
     if (e instanceof ConfigError) {
-      say(`ОШИБКА конфигурации: ${e.message}`);
+      say(`CONFIG ERROR: ${e.message}`);
       return 1;
     }
-    say(`ОШИБКА: ${(e as Error).message}`);
+    say(`ERROR: ${(e as Error).message}`);
     return 1;
   } finally {
     rl.close();
