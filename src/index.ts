@@ -17,7 +17,7 @@ import { TelegramGateway } from './gateway/telegram.js';
 import { startControlServer, CONTROL_PORT } from './control.js';
 import { preflight } from './preflight.js';
 import { runSetupWizard } from './setup.js';
-import { suggestSlugLLM } from './naming.js';
+import { suggestSlugLLM, suggestSlugCLI } from './naming.js';
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'start';
@@ -104,12 +104,18 @@ async function main(): Promise<void> {
 
   const deployEngine = new DockerDeployEngine(docker, caddy, config.baseDomain);
   const controlUrl = process.env.BOTSMAN_CONTROL_URL ?? `http://127.0.0.1:${CONTROL_PORT}`;
-  // LLM-based slug naming needs the Messages API — with subscription-only
-  // auth we fall back to the transliteration heuristic.
+  // LLM-based slug naming: Messages API with an API key, a one-turn claude
+  // CLI call with a subscription token; heuristic fallback inside on errors.
   const apiKey = config.anthropicApiKey;
+  const oauth = config.claudeCodeOauthToken;
+  const suggestName = apiKey
+    ? (description: string) => suggestSlugLLM(apiKey, description)
+    : oauth
+      ? (description: string) => suggestSlugCLI(oauth, description)
+      : undefined;
   const orchestrator = new Orchestrator(
     store, agent, deployEngine, pgAdmin, config.baseDomain, controlUrl, controlToken, telemetry,
-    apiKey ? (description) => suggestSlugLLM(apiKey, description) : undefined,
+    suggestName,
   );
 
   const reconcileNotes = await orchestrator.reconcileOnStartup(docker);

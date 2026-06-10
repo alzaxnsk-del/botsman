@@ -1,4 +1,6 @@
+import { spawn } from 'node:child_process';
 import { isValidSlug, slugFromDescription } from './slug.js';
+import { parseClaudeJson } from './agent/ClaudeCodeAgent.js';
 
 /**
  * Project naming. The transliteration heuristic gives ugly slugs for russian
@@ -50,6 +52,45 @@ export async function suggestSlugLLM(
   } catch {
     return null;
   }
+}
+
+/**
+ * Subscription-mode naming: one-turn headless Claude Code call (the Messages
+ * API needs an API key, but the CLI works with the oauth token). Falls back
+ * to null on any error or timeout — caller uses the heuristic then.
+ */
+export async function suggestSlugCLI(oauthToken: string, description: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'claude',
+      [
+        '-p',
+        `Suggest a short kebab-case slug (2-3 short english words, only [a-z0-9-]) naming this web service: "${description.slice(0, 500)}". Reply with ONLY the slug, e.g. price-watcher.`,
+        '--max-turns', '1',
+        '--output-format', 'json',
+      ],
+      {
+        env: {
+          PATH: process.env.PATH ?? '',
+          HOME: process.env.HOME ?? '/tmp',
+          CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
+        },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      },
+    );
+    let out = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve(null);
+    }, 30_000);
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const parsed = parseClaudeJson(out);
+      resolve(parsed && !parsed.is_error ? sanitizeSlugCandidate(parsed.result ?? '') : null);
+    });
+  });
 }
 
 /** LLM name with heuristic fallback — never throws. */
