@@ -1,5 +1,6 @@
 import readline from 'node:readline/promises';
 import fs from 'node:fs';
+import dns from 'node:dns/promises';
 import { stdin, stdout } from 'node:process';
 import { saveConfig, validateConfig, ConfigError } from './config.js';
 import { paths } from './paths.js';
@@ -130,10 +131,21 @@ export async function runSetupWizard(): Promise<number> {
       return 1;
     }
 
-    const baseDomain = (await ask(
-      '4/5 Base domain for your services (e.g. apps.example.com;\n    requires a wildcard DNS record *.apps.example.com → this server\'s IP)',
-      prev?.baseDomain,
-    )).toLowerCase();
+    say('4/5 Base domain for your services (e.g. apps.example.com).');
+    say('    At your DNS provider, create a wildcard A-record pointing at THIS server:');
+    say('      type: A    host: *.apps (or just * if the whole domain is for Botsman)');
+    say('      value: <this server\'s public IP>');
+    say('    Verify with: dig +short anything.apps.example.com');
+    const baseDomain = (await ask('    Base domain', prev?.baseDomain)).toLowerCase();
+    say('    Checking the wildcard DNS record…');
+    try {
+      await dns.lookup(`botsman-dns-probe.${baseDomain}`);
+      say('    ✓ wildcard DNS resolves');
+    } catch {
+      say(`    WARNING: botsman-dns-probe.${baseDomain} does not resolve yet.`);
+      say('    Links and TLS will not work until the wildcard record exists.');
+      say('    Setup continues — the record can be added later (propagation may take minutes).');
+    }
 
     const prevTelemetry = prev ? (prev.telemetry?.enabled ? 'y' : 'n') : undefined;
     const telemetryAnswer = (await ask(
