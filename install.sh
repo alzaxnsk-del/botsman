@@ -11,7 +11,17 @@ BOTSMAN_DIR="${BOTSMAN_DIR:-/opt/botsman}"
 log()  { echo -e "\033[1;32m[botsman]\033[0m $*"; }
 fail() { echo -e "\033[1;31m[botsman]\033[0m $*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || exec sudo -E bash "$0" "$@"
+# Root needed. Re-exec via sudo only when running from a file: with
+# `curl | bash` $0 is just "bash", so re-exec would break — ask for sudo instead.
+if [ "$(id -u)" -ne 0 ]; then
+  if [ -f "$0" ]; then
+    exec sudo -E bash "$0" "$@"
+  fi
+  fail "Нужны права root. Запусти так:
+  curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | sudo bash"
+fi
+
+export DEBIAN_FRONTEND=noninteractive
 
 . /etc/os-release 2>/dev/null || true
 case "${VERSION_ID:-}" in
