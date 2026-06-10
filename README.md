@@ -67,6 +67,11 @@ Under the hood:
 
 ## Quick start
 
+Before running, create a **wildcard DNS record** at your DNS provider: an A-record
+with host `*.apps` (or `*`) pointing at your server's IP, so that
+`anything.apps.yourdomain.com` resolves to the server. Verify:
+`dig +short anything.apps.yourdomain.com` → your server IP.
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
 ```
