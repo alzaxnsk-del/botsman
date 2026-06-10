@@ -1,0 +1,37 @@
+{
+  "name": "botsman",
+  "version": "0.1.0",
+  "description": "Self-hosted chat-to-deploy layer: describe a web service in Telegram, get it deployed on your VPS with HTTPS",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "botsman": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.0",
+    "dockerode": "^4.0.2",
+    "grammy": "^1.30.0",
+    "playwright": "^1.49.0",
+    "tar-fs": "^3.0.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/dockerode": "^3.3.32",
+    "@types/node": "^22.10.0",
+    "@types/tar-fs": "^2.0.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "admin": {
+    "listen": "unix//run/caddy/admin.sock|0666",
+    "origins": ["botsman"]
+  },
+  "apps": {
+    "http": {
+      "servers": {
+        "main": {
+          "listen": [":443"],
+          "routes": []
+        }
+      }
+    }
+  }
+}
