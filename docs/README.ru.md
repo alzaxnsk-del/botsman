@@ -21,7 +21,7 @@ Botsman: ✓ Обновил, ссылка та же.
 - Домен с **wildcard DNS-записью**: `*.apps.example.com → IP сервера` (A-запись). Без неё ссылки и TLS не заработают.
 - Telegram-бот: создай у [@BotFather](https://t.me/BotFather), получи токен.
 - Твой Telegram user ID: узнай у [@userinfobot](https://t.me/userinfobot).
-- Anthropic API key (`sk-ant-…`): [console.anthropic.com](https://console.anthropic.com).
+- Авторизация кодящего агента — одно из двух: **подписка Claude (Pro/Max)** — токен через `claude setup-token` на машине, где ты залогинен в Claude Code (без доплат сверх подписки, расход в счёт её лимитов), или **API-ключ Anthropic** (`sk-ant-api…`, оплата за токены).
 - Открытые порты 80 и 443.
 
 ## Установка
@@ -73,7 +73,8 @@ git push   # автоматически передеплоит; результа
 |---|---|---|
 | `telegramBotToken` | да | токен от @BotFather |
 | `ownerIds` | да | массив Telegram user ID владельца |
-| `anthropicApiKey` | да | ключ Anthropic (BYO-key) |
+| `anthropicApiKey` | одно из двух | API-ключ Anthropic (оплата за использование) |
+| `claudeCodeOauthToken` | одно из двух | токен подписки Claude из `claude setup-token` (`sk-ant-oat…`); при обоих заданных приоритет у него. LLM-нейминг слагов работает только с API-ключом — с подпиской используется эвристика |
 | `baseDomain` | да | базовый домен, например `apps.example.com` |
 | `telemetry.enabled` | нет | анонимная телеметрия, **по умолчанию `false`** |
 | `telemetry.endpoint` | нет | куда слать события; **без него события никуда не отправляются**, даже при `enabled: true` |

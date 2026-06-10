@@ -59,7 +59,9 @@ Under the hood:
 - A Linux VPS (Ubuntu 22.04 or 24.04), 2 vCPU / 4 GB RAM is a comfortable starting point.
 - A domain with a **wildcard DNS record** pointing at your server, e.g. `*.apps.yourdomain.com → <your server IP>`.
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather)) and your Telegram user ID.
-- An API key for the coding agent.
+- Auth for the coding agent — either of:
+  - your **Claude subscription** (Pro/Max): generate a token with `claude setup-token` on a machine where you're logged into Claude Code — no extra API bills, usage counts against your plan limits;
+  - an **Anthropic API key** (pay-per-use, [console.anthropic.com](https://console.anthropic.com)).
 
 ---
 
@@ -69,7 +71,7 @@ Under the hood:
 curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
 ```
 
-The installer sets up Docker (if needed), starts the Botsman daemon and reverse proxy, and walks you through a short setup wizard (bot token, your Telegram ID, API key, base domain). Once it's running, message your bot `/start`.
+The installer sets up Docker (if needed), starts the Botsman daemon and reverse proxy, and walks you through a short setup wizard (bot token, your Telegram ID, subscription token or API key, base domain). Once it's running, message your bot `/start`.
 
 Full setup, including the DNS wildcard record, is in [docs/install.md](docs/install.md). Полная операционная документация на русском — [docs/README.ru.md](docs/README.ru.md).
 

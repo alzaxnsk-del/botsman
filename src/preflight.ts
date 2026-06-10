@@ -1,6 +1,8 @@
 import dns from 'node:dns/promises';
+import { spawn } from 'node:child_process';
 import type Dockerode from 'dockerode';
 import { logger } from './logger.js';
+import { parseClaudeJson } from './agent/ClaudeCodeAgent.js';
 import type { BotsmanConfig } from './types.js';
 import type { CaddyClient } from './deploy/caddy.js';
 
@@ -41,8 +43,18 @@ export async function preflight(
   const tg = await checkTelegramToken(config.telegramBotToken);
   if (!tg.ok) fatal.push(`Telegram bot token does not work: ${tg.error}`);
 
-  const claude = await checkAnthropicKey(config.anthropicApiKey);
-  if (!claude.ok) fatal.push(`Anthropic API key does not work: ${claude.error}`);
+  if (config.claudeCodeOauthToken) {
+    // Format check only at startup: the wizard already did a live probe, and a
+    // bad token surfaces clearly on the first task (keeps daemon boots fast).
+    if (!/^sk-ant-oat/.test(config.claudeCodeOauthToken)) {
+      fatal.push('claudeCodeOauthToken does not look like a `claude setup-token` value (sk-ant-oat…).');
+    }
+  } else if (config.anthropicApiKey) {
+    const claude = await checkAnthropicKey(config.anthropicApiKey);
+    if (!claude.ok) fatal.push(`Anthropic API key does not work: ${claude.error}`);
+  } else {
+    fatal.push('No coding agent auth configured: set anthropicApiKey or claudeCodeOauthToken.');
+  }
 
   if (!(await caddy.ping())) {
     warnings.push('Caddy Admin API is unreachable — deploys cannot publish routes until Caddy is up.');
@@ -60,6 +72,48 @@ export async function preflight(
   for (const w of warnings) logger.warn(`preflight: ${w}`);
   for (const f of fatal) logger.error(`preflight: ${f}`);
   return { fatal, warnings };
+}
+
+/**
+ * Live probe for a subscription token: run a one-turn headless Claude Code
+ * request. Used by the setup wizard (the daemon image always has the CLI);
+ * spends a negligible bit of the subscription quota.
+ */
+export async function checkClaudeOauthToken(token: string): Promise<{ ok: boolean; error?: string }> {
+  if (!/^sk-ant-oat/.test(token)) {
+    return { ok: false, error: 'expected a token from `claude setup-token` (sk-ant-oat…)' };
+  }
+  return new Promise((resolve) => {
+    const child = spawn('claude', ['-p', 'Reply with exactly: ok', '--max-turns', '1', '--output-format', 'json'], {
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: process.env.HOME ?? '/tmp',
+        CLAUDE_CODE_OAUTH_TOKEN: token,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve({ ok: false, error: 'probe timed out after 90s' });
+    }, 90_000);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ ok: false, error: `cannot run claude CLI: ${e.message}` });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      const parsed = parseClaudeJson(out);
+      if (parsed && !parsed.is_error) return resolve({ ok: true });
+      resolve({
+        ok: false,
+        error: (parsed?.result ?? err ?? `exit code ${code}`).toString().slice(0, 300),
+      });
+    });
+  });
 }
 
 export async function checkTelegramToken(token: string): Promise<{ ok: boolean; error?: string }> {
