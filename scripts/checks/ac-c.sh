@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# AC-C: итерация и откат.
-#   AC-C1 (manual trigger): отправь боту «<slug> добавь тёмную тему», дождись ✅,
-#     затем запусти этот скрипт — он проверит новый коммит и что сайт жив.
-#   AC-C2 (manual trigger): отправь правку, ломающую сборку (например
-#     «<slug> допиши в Dockerfile строку RUN exit 1»), дождись ❌ —
-#     скрипт проверит, что старая версия продолжает отвечать 200.
-#   AC-C3: /rollback <slug> в Telegram; скрипт замеряет доступность.
+# AC-C: iteration and rollback.
+#   AC-C1 (manual trigger): message the bot "<slug> add a dark theme", wait for ✅,
+#     then run this script — it verifies the new commit and that the site is alive.
+#   AC-C2 (manual trigger): send an edit that breaks the build (e.g.
+#     "<slug> add a RUN exit 1 line to the Dockerfile"), wait for ❌ —
+#     the script verifies the old version still answers 200.
+#   AC-C3: /rollback <slug> in Telegram; the script measures availability.
 # Usage: ./ac-c.sh <slug>
 . "$(dirname "$0")/lib.sh"
 require_slug "${1:-}"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# AC-B: главный сценарий создания. Перед запуском отправь боту в Telegram:
-#   «сделай TODO-сервис со списком задач и возможностью отмечать выполненные»
-# дождись ответа со ссылкой (AC-B4: ≤15 минут) и скриншотом (AC-B3 — глазами),
-# затем:  ./ac-b.sh <slug>
+# AC-B: the main creation scenario. Before running, message the bot in Telegram:
+#   "make a TODO service with a task list and the ability to mark tasks done"
+# wait for the reply with a link (AC-B4: ≤15 min) and a screenshot (AC-B3 — eyeball it),
+# then:  ./ac-b.sh <slug>
 . "$(dirname "$0")/lib.sh"
 require_slug "${1:-}"
 SLUG="$1"
@@ -20,7 +20,7 @@ echo "AC-B2: persistence across container restart"
 C=$(app_container "$SLUG")
 MARKER="ac-b2-$(date +%s)"
 curl -fsS -X POST "https://$DOMAIN/add" --data-urlencode "title=$MARKER" >/dev/null \
-  || fail "could not create a record via POST /add (если форма другая — добавь запись руками и перезапусти контейнер)"
+  || fail "could not create a record via POST /add (if the form differs — add a record manually and restart the container)"
 docker restart "$C" >/dev/null
 sleep 8
 if curl -fsS --max-time 20 "https://$DOMAIN/" | grep -q "$MARKER"; then

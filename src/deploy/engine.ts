@@ -88,7 +88,7 @@ export class DockerDeployEngine implements DeployEngine {
 
       // Migrations (if the project defines them) run before the new version starts.
       if (this.hasMigrateScript(dir)) {
-        report('deploying', 'миграции БД');
+        report('deploying', 'database migrations');
         await this.runMigrations(slug, image, db);
       }
 
@@ -118,13 +118,13 @@ export class DockerDeployEngine implements DeployEngine {
 
       // The service is live internally; verify the public URL too (DNS + TLS).
       // Failure here is a WARNING, not a deploy failure — issuance can lag.
-      report('checking', 'публичный адрес');
+      report('checking', 'public URL');
       const publicUrl = `https://${host}/`;
       const pub = await smokeCheck(publicUrl, { timeoutMs: 45_000, intervalMs: 5_000 });
       const publicWarning = pub.ok
         ? undefined
-        : `Сервис работает, но ${publicUrl} пока не отвечает (${pub.error ?? 'нет ответа'}). ` +
-          `Проверь wildcard DNS *.${this.baseDomain} → IP сервера; TLS-сертификат может выпускаться ещё пару минут.`;
+        : `The service is up internally, but ${publicUrl} is not answering yet (${pub.error ?? 'no response'}). ` +
+          `Check the wildcard DNS record *.${this.baseDomain} → this server's IP; the TLS certificate may take a couple more minutes to issue.`;
 
       report('screenshot');
       const screenshotPath = await takeScreenshot(internalUrl, slug);
@@ -138,21 +138,21 @@ export class DockerDeployEngine implements DeployEngine {
   async rollback(project: ProjectMeta, report: StageReporter): Promise<DeployResult> {
     const { slug, prevImage, prevCommit } = project;
     if (!prevImage || !prevCommit) {
-      return { ok: false, error: 'Нет предыдущей рабочей версии для отката.' };
+      return { ok: false, error: 'No previous working version to roll back to.' };
     }
     // Unique suffix: repeated rollbacks to the same commit must not collide on container name.
     const name = `${this.containerName(slug, prevCommit)}-rb${Date.now().toString(36).slice(-4)}`;
     const host = this.hostFor(slug);
     const db: ProjectDb = { dbName: project.dbName, dbUser: project.dbUser, dbPassword: project.dbPassword };
     try {
-      report('deploying', 'откат на предыдущий образ');
+      report('deploying', 'rolling back to the previous image');
       const oldContainers = await this.findProjectContainers(slug);
       await this.startContainer(name, prevImage, slug, db);
       report('checking');
       const smoke = await smokeCheck(`http://${name}:${SERVICE_PORT}/`);
       if (!smoke.ok) {
         await this.removeContainer(name).catch(() => {});
-        return { ok: false, error: `Откат не прошёл smoke-check: ${smoke.error}` };
+        return { ok: false, error: `Rollback failed the smoke-check: ${smoke.error}` };
       }
       await this.caddy.upsertRoute(slug, host, `${name}:${SERVICE_PORT}`);
       for (const old of oldContainers) {
@@ -196,7 +196,7 @@ export class DockerDeployEngine implements DeployEngine {
 
   async containerLogs(slug: string, lines = 50): Promise<string> {
     const names = await this.findProjectContainers(slug);
-    if (!names.length) return '(контейнер не найден)';
+    if (!names.length) return '(container not found)';
     return this.containerLogsByName(names[0], lines);
   }
 
@@ -262,7 +262,7 @@ export class DockerDeployEngine implements DeployEngine {
       const status = await container.wait();
       if (status.StatusCode !== 0) {
         const logs = await this.containerLogsByName(name, 50).catch(() => '');
-        throw new Error(`Миграции упали (exit ${status.StatusCode}):\n${logs.slice(-800)}`);
+        throw new Error(`Migrations failed (exit ${status.StatusCode}):\n${logs.slice(-800)}`);
       }
     } finally {
       await container.remove({ force: true }).catch(() => {});

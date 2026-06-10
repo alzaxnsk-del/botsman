@@ -17,7 +17,7 @@ if [ "$(id -u)" -ne 0 ]; then
   if [ -f "$0" ]; then
     exec sudo -E bash "$0" "$@"
   fi
-  fail "Нужны права root. Запусти так:
+  fail "Root privileges required. Run it like this:
   curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | sudo bash"
 fi
 
@@ -26,40 +26,40 @@ export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release 2>/dev/null || true
 case "${VERSION_ID:-}" in
   22.04|24.04) ;;
-  *) log "ВНИМАНИЕ: установщик рассчитан на Ubuntu 22.04/24.04, у тебя ${PRETTY_NAME:-неизвестная ОС}. Продолжаю...";;
+  *) log "WARNING: this installer targets Ubuntu 22.04/24.04, you are on ${PRETTY_NAME:-an unknown OS}. Continuing...";;
 esac
 
-log "Ставлю базовые пакеты..."
+log "Installing base packages..."
 apt-get update -qq
 apt-get install -y -qq curl git ca-certificates >/dev/null
 
 if ! command -v docker >/dev/null 2>&1; then
-  log "Docker не найден — устанавливаю (get.docker.com)..."
+  log "Docker not found — installing (get.docker.com)..."
   curl -fsSL https://get.docker.com | sh
 fi
-systemctl enable --now docker  # переживает reboot (AC-A2)
+systemctl enable --now docker  # survives reboot (AC-A2)
 
 if [ -d "$BOTSMAN_DIR/.git" ]; then
-  log "Обновляю код в $BOTSMAN_DIR..."
+  log "Updating code in $BOTSMAN_DIR..."
   git -C "$BOTSMAN_DIR" pull --ff-only
 else
-  log "Клонирую $BOTSMAN_REPO в $BOTSMAN_DIR..."
+  log "Cloning $BOTSMAN_REPO into $BOTSMAN_DIR..."
   git clone --depth 1 "$BOTSMAN_REPO" "$BOTSMAN_DIR"
 fi
 cd "$BOTSMAN_DIR"
 
-# Состояние живёт в ~/.botsman настоящего пользователя (не root'а при sudo).
+# State lives in ~/.botsman of the real user (not root's when run via sudo).
 REAL_HOME="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)"
 BOTSMAN_HOME="${REAL_HOME}/.botsman"
 mkdir -p "$BOTSMAN_HOME"
 chmod 700 "$BOTSMAN_HOME"
 
 if [ ! -f .env ]; then
-  log "Генерирую .env (пароль Postgres, UID владельца, GID docker-сокета)..."
+  log "Generating .env (Postgres password, owner UID, docker socket GID)..."
   {
     echo "BOTSMAN_PG_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
     echo "BOTSMAN_HOME=$BOTSMAN_HOME"
-    # Демон работает под UID владельца, чтобы git push в ~/.botsman/repos работал по SSH.
+    # The daemon runs as the owner's UID so that git push into ~/.botsman/repos works over SSH.
     echo "BOTSMAN_UID=$(id -u "${SUDO_USER:-root}")"
     echo "BOTSMAN_GID=$(id -g "${SUDO_USER:-root}")"
     echo "DOCKER_GID=$(stat -c %g /var/run/docker.sock)"
@@ -68,30 +68,30 @@ if [ ! -f .env ]; then
 fi
 chown -R "${SUDO_USER:-root}:" "$BOTSMAN_HOME"
 
-log "Собираю образ Botsman (несколько минут на первом запуске)..."
+log "Building the Botsman image (takes several minutes on the first run)..."
 docker compose build --quiet
 
 if [ ! -f "$BOTSMAN_HOME/config.json" ]; then
-  log "Запускаю мастер настройки..."
-  # curl|bash: stdin занят пайпом, мастеру нужен терминал.
+  log "Starting the setup wizard..."
+  # curl|bash: stdin is taken by the pipe, the wizard needs a terminal.
   if ! docker compose run --rm --no-deps botsman setup </dev/tty; then
-    fail "Мастер настройки не завершён. Исправь данные и запусти заново:
+    fail "Setup wizard did not finish. Fix the inputs and run it again:
   cd $BOTSMAN_DIR && docker compose run --rm --no-deps botsman setup && docker compose up -d"
   fi
 fi
 
-log "Запускаю Botsman (демон + Caddy + Postgres)..."
+log "Starting Botsman (daemon + Caddy + Postgres)..."
 docker compose up -d
 
-log "Проверяю, что демон жив..."
+log "Waiting for the daemon to come up..."
 for i in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:8366/health >/dev/null 2>&1; then
-    log "✓ Botsman запущен."
-    log "Напиши своему боту в Telegram /start — и опиши первый сервис."
-    log "Не забудь wildcard DNS: *.<твой-домен> → IP этого сервера."
+    log "✓ Botsman is running."
+    log "Message your Telegram bot /start — and describe your first service."
+    log "Don't forget the wildcard DNS record: *.<your-domain> → this server's IP."
     exit 0
   fi
   sleep 2
 done
 docker compose logs --tail 30 botsman || true
-fail "Демон не ответил на healthcheck за 60 секунд — смотри логи выше (docker compose logs botsman)."
+fail "The daemon did not answer the healthcheck within 60 seconds — see the logs above (docker compose logs botsman)."

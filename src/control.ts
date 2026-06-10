@@ -40,7 +40,7 @@ export function startControlServer(
       res.end(JSON.stringify({ ok: true, queued: slug }));
       void orchestrator
         .enqueue('redeploy', 'git push', () => {}, slug)
-        .then((o) => onPushDeployed(slug, o.ok, o.ok ? `✅ ${slug}: задеплоил из git push.\n${o.url ?? ''}` : `❌ ${slug}: деплой из git push не удался:\n${o.error}`));
+        .then((o) => onPushDeployed(slug, o.ok, o.ok ? `✅ ${slug}: deployed from git push.\n${o.url ?? ''}` : `❌ ${slug}: deploy from git push failed:\n${o.error}`));
       return;
     }
     res.writeHead(404);
