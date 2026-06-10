@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Botsman installer for clean Ubuntu 22.04 / 24.04 (AC-A1).
-# Usage:  curl -fsSL https://raw.githubusercontent.com/<you>/botsman/main/install.sh | bash
+# Usage:  curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
 # Env:    BOTSMAN_REPO  — git URL of the botsman repo (default below)
 #         BOTSMAN_DIR   — install dir (default /opt/botsman)
 set -euo pipefail
 
-BOTSMAN_REPO="${BOTSMAN_REPO:-https://github.com/botsman/botsman.git}"
+BOTSMAN_REPO="${BOTSMAN_REPO:-https://github.com/alzaxnsk-del/botsman.git}"
 BOTSMAN_DIR="${BOTSMAN_DIR:-/opt/botsman}"
 
 log()  { echo -e "\033[1;32m[botsman]\033[0m $*"; }
@@ -16,7 +16,7 @@ fail() { echo -e "\033[1;31m[botsman]\033[0m $*" >&2; exit 1; }
 . /etc/os-release 2>/dev/null || true
 case "${VERSION_ID:-}" in
   22.04|24.04) ;;
-  *) log "ВНИМАНИЕ: тестировалось на Ubuntu 22.04/24.04, у тебя ${PRETTY_NAME:-неизвестная ОС}. Продолжаю...";;
+  *) log "ВНИМАНИЕ: установщик рассчитан на Ubuntu 22.04/24.04, у тебя ${PRETTY_NAME:-неизвестная ОС}. Продолжаю...";;
 esac
 
 log "Ставлю базовые пакеты..."
