@@ -26,6 +26,11 @@ You need:
    ```
 
    The setup wizard also checks the record and warns if it does not resolve.
+
+   > **Cloudflare users:** set the record to **DNS only** (grey cloud), not
+   > Proxied. Botsman's Caddy issues its own Let's Encrypt certificates, and
+   > the Cloudflare proxy breaks the ACME challenges (you'd get 5xx errors or
+   > redirect loops).
 3. **A Telegram bot token** — create a bot with [@BotFather](https://t.me/BotFather).
 4. **Your Telegram user ID** — ask [@userinfobot](https://t.me/userinfobot).
 5. **Coding agent auth** — pick one (bring-your-own: Botsman never proxies or resells tokens):
