@@ -7,10 +7,29 @@ set -euo pipefail
 
 BOTSMAN_REPO="${BOTSMAN_REPO:-https://github.com/alzaxnsk-del/botsman.git}"
 BOTSMAN_DIR="${BOTSMAN_DIR:-/opt/botsman}"
+TOTAL=7
 
-log()  { echo -e "\033[1;32m[botsman]\033[0m $*"; }
-fail() { echo -e "\033[1;31m[botsman]\033[0m $*" >&2; exit 1; }
+# --- look & feel -------------------------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  A=$'\033[38;5;208m'; B=$'\033[1m'; D=$'\033[2m'; G=$'\033[32m'; R=$'\033[31m'; X=$'\033[0m'
+else
+  A=''; B=''; D=''; G=''; R=''; X=''
+fi
 
+say()    { printf '%s\n' "$*"; }
+step()   { say ""; say "  ${A}[$1/${TOTAL}]${X} ${B}$2${X}"; }
+ok()     { say "        ${G}✓${X} $*"; }
+info()   { say "        ${D}$*${X}"; }
+fail()   { say ""; say "  ${R}✗ $*${X}" >&2; exit 1; }
+divider(){ say "  ${D}──────────────────────────────────────────────${X}"; }
+
+say ""
+say "  ${A}◆${X} ${B}Botsman${X}"
+say "    ${D}Describe a service in chat — get it deployed on your own server.${X}"
+say ""
+divider
+
+# --- preconditions -----------------------------------------------------------
 # Root needed. Re-exec via sudo only when running from a file: with
 # `curl | bash` $0 is just "bash", so re-exec would break — ask for sudo instead.
 if [ "$(id -u)" -ne 0 ]; then
@@ -18,7 +37,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exec sudo -E bash "$0" "$@"
   fi
   fail "Root privileges required. Run it like this:
-  curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | sudo bash"
+    curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | sudo bash"
 fi
 
 export DEBIAN_FRONTEND=noninteractive
@@ -26,42 +45,48 @@ export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release 2>/dev/null || true
 case "${VERSION_ID:-}" in
   22.04|24.04) ;;
-  *) log "WARNING: this installer targets Ubuntu 22.04/24.04, you are on ${PRETTY_NAME:-an unknown OS}. Continuing...";;
+  *) say "  ${D}Note: built for Ubuntu 22.04/24.04, you are on ${PRETTY_NAME:-an unknown OS}. Continuing…${X}";;
 esac
 
-log "Installing base packages..."
+step 1 "System packages"
 apt-get update -qq
 apt-get install -y -qq curl git ca-certificates >/dev/null
+ok "curl, git, ca-certificates"
 
-if ! command -v docker >/dev/null 2>&1; then
-  log "Docker not found — installing (get.docker.com)..."
-  curl -fsSL https://get.docker.com | sh
-fi
-systemctl enable --now docker  # survives reboot (AC-A2)
-
-if [ -d "$BOTSMAN_DIR/.git" ]; then
-  log "Updating code in $BOTSMAN_DIR..."
-  git -C "$BOTSMAN_DIR" pull --ff-only
+step 2 "Docker"
+if command -v docker >/dev/null 2>&1; then
+  ok "already installed ($(docker --version | sed 's/Docker version //;s/,.*//'))"
 else
-  log "Cloning $BOTSMAN_REPO into $BOTSMAN_DIR..."
-  git clone --depth 1 "$BOTSMAN_REPO" "$BOTSMAN_DIR"
+  info "not found — installing from get.docker.com…"
+  curl -fsSL https://get.docker.com | sh >/dev/null 2>&1
+  ok "installed"
+fi
+systemctl enable --now docker >/dev/null 2>&1  # survives reboot (AC-A2)
+ok "starts automatically on boot"
+
+step 3 "Botsman code"
+if [ -d "$BOTSMAN_DIR/.git" ]; then
+  git -C "$BOTSMAN_DIR" pull --ff-only --quiet
+  ok "updated $BOTSMAN_DIR"
+else
+  git clone --depth 1 --quiet "$BOTSMAN_REPO" "$BOTSMAN_DIR"
+  ok "cloned into $BOTSMAN_DIR"
 fi
 cd "$BOTSMAN_DIR"
 
+step 4 "Environment"
 # State lives in ~/.botsman of the real user (not root's when run via sudo).
 REAL_HOME="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)"
 BOTSMAN_HOME="${REAL_HOME}/.botsman"
 mkdir -p "$BOTSMAN_HOME"
 chmod 700 "$BOTSMAN_HOME"
 if [ -z "${SUDO_USER:-}" ]; then
-  log "Installing as root — fully supported: the daemon runs as root, while coding"
-  log "agents and deployed services always run as unprivileged users. State: $BOTSMAN_HOME"
+  ok "installing as root — fully supported"
+  info "the daemon runs as root; coding agents and deployed services run unprivileged"
 else
-  log "Installing for user ${SUDO_USER}. State: $BOTSMAN_HOME"
+  ok "installing for user ${SUDO_USER}"
 fi
-
 if [ ! -f .env ]; then
-  log "Generating .env (Postgres password, owner UID, docker socket GID)..."
   {
     echo "BOTSMAN_PG_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
     echo "BOTSMAN_HOME=$BOTSMAN_HOME"
@@ -73,31 +98,48 @@ if [ ! -f .env ]; then
   chmod 600 .env
 fi
 chown -R "${SUDO_USER:-root}:" "$BOTSMAN_HOME"
+ok "state directory: $BOTSMAN_HOME"
 
-log "Building the Botsman image (takes several minutes on the first run)..."
+step 5 "Building the Botsman image"
+info "takes several minutes on the first run — good moment for a coffee ☕"
 docker compose build --quiet
+ok "image built"
 
-if [ ! -f "$BOTSMAN_HOME/config.json" ]; then
-  log "Starting the setup wizard..."
+step 6 "Setup wizard"
+if [ -f "$BOTSMAN_HOME/config.json" ]; then
+  ok "existing config found — skipping (re-run anytime: docker compose run --rm --no-deps botsman setup)"
+else
   # curl|bash: stdin is taken by the pipe, the wizard needs a terminal.
   if ! docker compose run --rm --no-deps botsman setup </dev/tty; then
     fail "Setup wizard did not finish. Fix the inputs and run it again:
-  cd $BOTSMAN_DIR && docker compose run --rm --no-deps botsman setup && docker compose up -d"
+    cd $BOTSMAN_DIR && docker compose run --rm --no-deps botsman setup && docker compose up -d"
   fi
 fi
 
-log "Starting Botsman (daemon + Caddy + Postgres)..."
-docker compose up -d
-
-log "Waiting for the daemon to come up..."
+step 7 "Starting services"
+docker compose up -d --quiet-pull 2>/dev/null || docker compose up -d
+info "daemon + Caddy (HTTPS) + Postgres"
+HEALTHY=0
 for i in $(seq 1 30); do
-  if curl -fsS http://127.0.0.1:8366/health >/dev/null 2>&1; then
-    log "✓ Botsman is running."
-    log "Message your Telegram bot /start — and describe your first service."
-    log "Don't forget the wildcard DNS record: *.<your-domain> → this server's IP."
-    exit 0
-  fi
+  if curl -fsS http://127.0.0.1:8366/health >/dev/null 2>&1; then HEALTHY=1; break; fi
   sleep 2
 done
-docker compose logs --tail 30 botsman || true
-fail "The daemon did not answer the healthcheck within 60 seconds — see the logs above (docker compose logs botsman)."
+if [ "$HEALTHY" != "1" ]; then
+  docker compose logs --tail 30 botsman || true
+  fail "The daemon did not answer the healthcheck within 60 seconds — see the logs above (docker compose logs botsman)."
+fi
+ok "all services are up"
+
+say ""
+divider
+say ""
+say "  ${G}${B}✓ Botsman is running!${X}"
+say ""
+say "    ${B}Next steps${X}"
+say "    1. Open Telegram and send your bot:  ${B}/start${X}"
+say "    2. Describe your first service, for example:"
+say "       ${D}\"make a TODO service with a task list\"${X}"
+say ""
+say "    ${D}Make sure the wildcard DNS record exists: *.<your-domain> → this server.${X}"
+say "    ${D}Docs: https://github.com/alzaxnsk-del/botsman${X}"
+say ""
