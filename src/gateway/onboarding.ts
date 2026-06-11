@@ -6,7 +6,7 @@ import { checkAnthropicKey, checkClaudeOauthToken } from '../preflight.js';
 import { isCloudflareIp, serverPublicIp } from '../doctor.js';
 import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
 import type { Store } from '../db.js';
-import type { BotsmanConfig } from '../types.js';
+import { RESTART_NOTICE_KEY, SETUP_BACKUP_KEY, type BotsmanConfig } from '../types.js';
 
 export const READY_NOTIFY_KEY = 'notify_ready';
 
@@ -61,9 +61,15 @@ export class OnboardingBot {
       await this.advance(ctx);
     });
 
+    // Escape hatch from a /setup-triggered re-config: restore the previous
+    // value and go back to full mode. Only works when there is a backup (i.e.
+    // a genuine first-run onboarding can't be cancelled — it's required).
+    this.bot.command('cancel', (ctx) => this.cancelSetup(ctx));
+
     this.bot.on('callback_query:data', async (ctx) => {
       const data = ctx.callbackQuery.data;
       await ctx.answerCallbackQuery();
+      if (data === 'setup:cancel') { await this.cancelSetup(ctx); return; }
       switch (data) {
         case 'auth:oauth':
           this.expecting = 'oauth';
@@ -117,6 +123,7 @@ export class OnboardingBot {
 
     this.bot.on('message:text', async (ctx) => {
       const text = ctx.message.text.trim();
+      if (/^(\/cancel|отмена|cancel)$/i.test(text)) return this.cancelSetup(ctx);
       switch (this.expecting) {
         case 'oauth': return this.handleOauthToken(ctx, text);
         case 'apikey': return this.handleApiKey(ctx, text);
@@ -128,6 +135,31 @@ export class OnboardingBot {
     this.bot.catch((err) => logger.error('onboarding handler error', { error: String(err.error) }));
   }
 
+  /** Add a "✖️ Cancel (keep current)" button when this is a /setup re-config
+   *  (a backup exists), so the user is never trapped. Returns whether it added. */
+  private addCancel(kb: InlineKeyboard): boolean {
+    if (this.store.kvGet(SETUP_BACKUP_KEY)) {
+      kb.row().text('✖️ Cancel (keep current)', 'setup:cancel');
+      return true;
+    }
+    return false;
+  }
+
+  /** Restore the value a /setup change cleared and go back to full mode. */
+  private async cancelSetup(ctx: Context): Promise<void> {
+    const raw = this.store.kvGet(SETUP_BACKUP_KEY);
+    if (!raw) {
+      await ctx.reply('Nothing to cancel — this setup is required to start. Please finish it.');
+      return;
+    }
+    try { updateConfigFile(JSON.parse(raw) as Record<string, unknown>); } catch { /* keep going */ }
+    this.store.kvSet(SETUP_BACKUP_KEY, '');
+    this.store.kvSet(RESTART_NOTICE_KEY, '✓ Cancelled — kept your previous settings.');
+    await ctx.reply('Cancelled — restoring your previous settings…');
+    logger.info('setup re-config cancelled, restoring backup');
+    setTimeout(() => process.exit(0), 1500);
+  }
+
   /** Ask for the first missing piece; finish when nothing is missing. */
   private async advance(ctx: Context): Promise<void> {
     const missing = missingSetup(this.config());
@@ -136,6 +168,7 @@ export class OnboardingBot {
       const kb = new InlineKeyboard()
         .text('🔑 Claude subscription', 'auth:oauth')
         .text('💳 Anthropic API key', 'auth:api');
+      this.addCancel(kb);
       await ctx.reply(
         '*Step 1 of 3 · Coding agent*\n\n' +
         'How should I power code generation?\n\n' +
@@ -148,6 +181,8 @@ export class OnboardingBot {
     if (missing.includes('domain')) {
       this.expecting = 'domain';
       const ip = await serverPublicIp();
+      const kb = new InlineKeyboard();
+      const hasCancel = this.addCancel(kb);
       await ctx.reply(
         '*Step 2 of 3 · Domain*\n\n' +
         'Send me the base domain for your services, e.g. `example.com`.\n' +
@@ -155,8 +190,9 @@ export class OnboardingBot {
         'First create a wildcard A-record at your DNS provider:\n' +
         `\`\`\`\ntype  A\nhost  *\nvalue ${ip ?? '<this server\'s IP>'}\n\`\`\`\n` +
         '(If the domain is shared, use a sub-base like `apps.example.com` with host `*.apps` instead.)\n' +
-        '⚠️ On Cloudflare the record must be *DNS only* (grey cloud), not Proxied.',
-        { parse_mode: 'Markdown' },
+        '⚠️ On Cloudflare the record must be *DNS only* (grey cloud), not Proxied.' +
+        (hasCancel ? '\n\nSend /cancel or tap below to keep your current domain.' : ''),
+        { parse_mode: 'Markdown', reply_markup: hasCancel ? kb : undefined },
       );
       return;
     }
@@ -189,6 +225,7 @@ export class OnboardingBot {
       return;
     }
     updateConfigFile({ claudeCodeOauthToken: token, anthropicApiKey: undefined });
+    this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.expecting = null;
     await this.edit(ctx, probeMsg.message_id, '✓ Token works — usage counts against your subscription limits. Your message with the token has been deleted.');
     await this.askModel(ctx);
@@ -204,6 +241,7 @@ export class OnboardingBot {
       return;
     }
     updateConfigFile({ anthropicApiKey: key, claudeCodeOauthToken: undefined });
+    this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.expecting = null;
     await this.edit(ctx, probeMsg.message_id, '✓ Key works. Your message with the key has been deleted.');
     await this.askModel(ctx);
@@ -264,6 +302,7 @@ export class OnboardingBot {
       return;
     }
     updateConfigFile({ baseDomain: domain });
+    this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.pendingDomain = null;
     this.expecting = null;
     await ctx.reply(`✓ \`*.${domain}\` points at this server.`, { parse_mode: 'Markdown' });

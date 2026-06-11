@@ -22,7 +22,7 @@ import { MEMORY_FILE, type Orchestrator, type TaskOutcome } from '../orchestrato
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
 import type { DeployEngine } from '../deploy/engine.js';
-import { RESTART_NOTICE_KEY, type Stage } from '../types.js';
+import { RESTART_NOTICE_KEY, SETUP_BACKUP_KEY, type Stage } from '../types.js';
 
 const STAGE_LABELS: Record<Stage, string> = {
   accepted: '📥 Got it, working…',
@@ -265,11 +265,17 @@ export class TelegramGateway {
         await ctx.answerCallbackQuery();
         const what = data.slice('setup:'.length);
         if (what === 'auth') {
+          const cfg = updateConfigFile({});
+          this.store.kvSet(SETUP_BACKUP_KEY, JSON.stringify({
+            anthropicApiKey: cfg.anthropicApiKey, claudeCodeOauthToken: cfg.claudeCodeOauthToken,
+          }));
           updateConfigFile({ anthropicApiKey: undefined, claudeCodeOauthToken: undefined });
-          await ctx.reply('Restarting into setup — I will ask for the new agent auth here in ~10s…');
+          await ctx.reply('Restarting to change the coding-agent auth — I will ask here in ~10s.\nSend /cancel there to keep your current one.');
         } else if (what === 'domain') {
+          const cfg = updateConfigFile({});
+          this.store.kvSet(SETUP_BACKUP_KEY, JSON.stringify({ baseDomain: cfg.baseDomain }));
           updateConfigFile({ baseDomain: undefined });
-          await ctx.reply('Restarting into setup — I will ask for the new domain here in ~10s…\n(existing projects keep their current addresses)');
+          await ctx.reply('Restarting to change the domain — I will ask here in ~10s.\nSend /cancel there to keep your current one. (Existing projects keep their addresses.)');
         } else if (what === 'telemetry') {
           const cfg = updateConfigFile({});
           const enabled = !cfg.telemetry.enabled;
