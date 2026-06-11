@@ -181,6 +181,30 @@ describe('Orchestrator pipeline', () => {
     expect(fs.existsSync(paths.bareRepo(created.slug))).toBe(false);
   });
 
+  it('askProject answers read-only — never commits or deploys', async () => {
+    let askMode = '';
+    const agent: CodingAgent = {
+      run: async (input) => {
+        askMode = input.mode;
+        if (input.mode === 'ask') return { ok: true, summary: 'It is an Express app with one route.', durationMs: 1 };
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), 'v1');
+        return { ok: true, summary: 'made', durationMs: 1 };
+      },
+    };
+    const engine = fakeEngine();
+    const orch = makeOrch(agent, engine);
+    const created = await orch.enqueue('create', 'сделай сервис приветствий', () => {});
+    const before = store.getProject(created.slug)!;
+
+    const ans = await orch.askProject(created.slug, 'how is this built?');
+    expect(askMode).toBe('ask');
+    expect(ans.ok).toBe(true);
+    expect(ans.answer).toContain('Express');
+    // No new deploy, commit unchanged.
+    expect(engine.deploys).toHaveLength(1);
+    expect(store.getProject(created.slug)!.currentCommit).toBe(before.currentCommit);
+  });
+
   it('redeploy of the already-live commit is a no-op (git push without changes)', async () => {
     const agent = fakeAgent(({ projectDir }) => {
       fs.writeFileSync(path.join(projectDir, 'server.js'), 'v1');

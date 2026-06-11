@@ -19,6 +19,8 @@ import { startControlServer, CONTROL_PORT } from './control.js';
 import { preflight } from './preflight.js';
 import { runSetupWizard } from './setup.js';
 import { suggestSlugLLM, suggestSlugCLI } from './naming.js';
+import { makeStructuredLlm } from './llm.js';
+import { HostExec } from './hostExec.js';
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'start';
@@ -141,8 +143,15 @@ async function main(): Promise<void> {
 
   const reconcileNotes = await orchestrator.reconcileOnStartup(docker);
 
+  // Conversational rooms: a structured LLM (DevOps + project routers) and the
+  // privileged host-exec helper. structuredLlm uses the same auth as the namer.
+  const structuredLlm = makeStructuredLlm({ apiKey, oauthToken: oauth });
+  const hostExec = new HostExec(docker);
+  const hostRepoDir = process.env.BOTSMAN_REPO_DIR ?? '/opt/botsman';
+
   const gateway = new TelegramGateway(
     config.telegramBotToken, config.ownerIds, orchestrator, store, deployEngine, telemetry,
+    docker, hostExec, hostRepoDir, structuredLlm,
   );
 
   startControlServer(orchestrator, controlToken, (slug, _ok, message) => void gateway.notifyOwner(message));

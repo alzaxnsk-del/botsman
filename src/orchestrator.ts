@@ -400,6 +400,31 @@ export class Orchestrator {
 
   // --- queries used by the gateway ---
 
+  /**
+   * Answer a QUESTION about a project (project-room chat). Runs the agent in
+   * read-only 'ask' mode and returns its text — NEVER commits or deploys. Runs
+   * outside the serialized task queue (no write race), so questions stay snappy
+   * even while a deploy is in flight.
+   */
+  async askProject(slug: string, question: string): Promise<{ ok: boolean; answer: string; costUsd?: number }> {
+    const project = this.store.getProject(slug);
+    if (!project) return { ok: false, answer: `Project ${slug} not found.` };
+    const logs = await this.deployEngine.containerLogs(slug, 40).catch(() => '');
+    const context = [
+      `Project slug: ${slug}. Public URL: https://${project.domain}/`,
+      logs ? `Recent container logs (last lines):\n${logs.slice(-2000)}` : '',
+    ].filter(Boolean);
+    const run = await this.agent.run({
+      projectDir: paths.projectDir(slug),
+      instruction: question,
+      mode: 'ask',
+      context,
+    });
+    return run.ok
+      ? { ok: true, answer: run.summary, costUsd: run.costUsd }
+      : { ok: false, answer: run.error ?? 'Could not answer the question.' };
+  }
+
   async statusText(slug: string): Promise<string | null> {
     const p = this.store.getProject(slug);
     if (!p) return null;
