@@ -51,14 +51,25 @@ The script, in one pass:
 
 1. Installs Docker if missing and enables it at boot (survives reboots).
 2. Clones the repo into `/opt/botsman` and builds the image.
-3. Runs an interactive wizard: bot token → your Telegram ID → agent auth
-   (subscription token or API key) → base domain → telemetry opt-in (default
-   **off**). Tokens are validated with live probes; an invalid key ends the
-   wizard with a clear error, not a traceback.
+3. Asks two questions in the console: your **bot token** (live-checked) and
+   your **Telegram user ID**. That's all the console needs.
 4. Starts `docker compose`: the daemon + Caddy (automatic Let's Encrypt) +
    Postgres.
 
-Then message your bot `/start` and describe your first service.
+Then open Telegram and send your bot `/start` — it finishes the setup in the
+chat, step by step:
+
+1. **Coding agent** — pick Claude subscription or API key with a button and
+   paste the token; the bot validates it live and deletes your message with
+   the secret right away.
+2. **Domain** — the bot shows the exact wildcard A-record to create (with this
+   server's real IP), checks it live, detects a Cloudflare-proxied record and
+   waits with a "Re-check" button until DNS propagates.
+3. **Telemetry** — one tap, off by default.
+
+After the last step the daemon restarts itself with the full config and the
+bot says it is ready for the first service. Change any of these later with
+`/setup` in the chat.
 
 > **Root or sudo?** Both are supported. On a fresh VPS where you log in as
 > root, just run the command as is — the daemon will run as root, but the
@@ -87,7 +98,7 @@ Edit `~/.botsman/config.json`, then `docker compose restart botsman`.
 | `ownerIds` | yes | array of whitelisted Telegram user IDs |
 | `anthropicApiKey` | one of the two | pay-per-use API key (`sk-ant-api…`) |
 | `claudeCodeOauthToken` | one of the two | Claude subscription token from `claude setup-token` (`sk-ant-oat…`); wins if both are set |
-| `baseDomain` | yes | e.g. `apps.example.com` |
+| `baseDomain` | set in chat | e.g. `apps.example.com`; collected during in-chat onboarding |
 | `telemetry.enabled` | no | default `false`; see below |
 | `telemetry.endpoint` | no | without it nothing is ever sent, even if enabled |
 | `agent.maxTurns` | no | agent iteration cap per task (default 60) |

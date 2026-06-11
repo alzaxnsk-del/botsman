@@ -68,8 +68,11 @@ export interface BotsmanConfig {
    */
   anthropicApiKey?: string;
   claudeCodeOauthToken?: string;
-  /** e.g. "apps.example.com" — wildcard *.apps.example.com must point at this server. */
-  baseDomain: string;
+  /**
+   * e.g. "apps.example.com" — wildcard *.apps.example.com must point at this
+   * server. Optional until onboarding (in the Telegram chat) completes.
+   */
+  baseDomain?: string;
   /** Strictly opt-in anonymous telemetry. Default false. */
   telemetry: {
     enabled: boolean;

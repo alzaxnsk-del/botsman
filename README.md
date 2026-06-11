@@ -67,16 +67,13 @@ Under the hood:
 
 ## Quick start
 
-Before running, create a **wildcard DNS record** at your DNS provider: an A-record
-with host `*.apps` (or `*`) pointing at your server's IP, so that
-`anything.apps.yourdomain.com` resolves to the server. Verify:
-`dig +short anything.apps.yourdomain.com` → your server IP. On Cloudflare, set the record to **DNS only** (grey cloud) — the proxy breaks Let's Encrypt issuance.
+Have a domain ready: each project gets its own subdomain under a base domain you choose (e.g. `apps.yourdomain.com`). The bot will show you the exact wildcard DNS record to create — with this server's IP — and verify it live during setup. On Cloudflare, the record must be **DNS only** (grey cloud).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
 ```
 
-The installer sets up Docker (if needed), starts the Botsman daemon and reverse proxy, and walks you through a short setup wizard (bot token, your Telegram ID, subscription token or API key, base domain). Once it's running, message your bot `/start`.
+The installer sets up Docker (if needed), starts the Botsman daemon and reverse proxy, and asks just **two questions** in the console: your bot token (from @BotFather) and your Telegram user ID. Everything else — coding agent auth (Claude subscription or API key), domain with a live DNS check, telemetry — the bot collects **right in the Telegram chat**, with buttons and validation. Secrets pasted into the chat are deleted immediately after being saved.
 
 Installing **as root is fine** (the typical fresh VPS): the daemon runs as root, while the coding agent and every deployed service always run as unprivileged users in their own containers.
 
@@ -95,6 +92,7 @@ Full setup, including the DNS wildcard record, is in [docs/install.md](docs/inst
 | `/logs <project>` | Recent logs from the service |
 | `/doctor <project>` | Diagnose problems (container, DNS, TLS) with one-tap fixes |
 | `/rollback <project>` | Roll back to the previous working version |
+| `/setup` | Change agent auth, domain or telemetry — right in the chat |
 | `/delete <project>` | Stop and remove a project (asks for confirmation) |
 
 ---

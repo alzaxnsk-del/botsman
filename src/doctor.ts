@@ -43,7 +43,8 @@ export function classifyPublicError(message: string): 'tls' | 'unreachable' | 'o
 }
 
 let cachedPublicIp: string | null | undefined;
-async function serverPublicIp(): Promise<string | null> {
+/** This server's public IPv4 (cached); null when undetectable. */
+export async function serverPublicIp(): Promise<string | null> {
   if (cachedPublicIp !== undefined) return cachedPublicIp;
   try {
     const res = await fetch('https://api.ipify.org', { signal: AbortSignal.timeout(5_000) });

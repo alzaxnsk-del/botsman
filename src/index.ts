@@ -5,7 +5,8 @@ import crypto from 'node:crypto';
 import Dockerode from 'dockerode';
 import { logger } from './logger.js';
 import { paths } from './paths.js';
-import { configExists, loadConfig, ConfigError } from './config.js';
+import { configExists, loadConfig, missingSetup, ConfigError } from './config.js';
+import { OnboardingBot, READY_NOTIFY_KEY } from './gateway/onboarding.js';
 import { Store } from './db.js';
 import { Telemetry } from './telemetry.js';
 import { ClaudeCodeAgent } from './agent/ClaudeCodeAgent.js';
@@ -54,11 +55,31 @@ async function main(): Promise<void> {
     fs.mkdirSync(process.env.HOME, { recursive: true });
   }
   logger.init();
-  logger.info('botsman starting', { baseDomain: config.baseDomain });
+  logger.info('botsman starting', { baseDomain: config.baseDomain ?? '(onboarding)' });
 
   const docker = new Dockerode({
     socketPath: config.docker?.socketPath ?? '/var/run/docker.sock',
   });
+
+  // Console bootstrap gave us only the trust channel (bot token + owner ID)?
+  // Then run the in-chat onboarding instead of the full daemon. When it
+  // finishes, the process exits and the restart policy brings us back here
+  // with a complete config.
+  if (missingSetup(config).length > 0) {
+    try {
+      await docker.ping();
+    } catch (e) {
+      console.error(`Docker is unreachable (${(e as Error).message}). Check the socket mount.`);
+      process.exit(1);
+    }
+    const store = new Store();
+    const telemetry = new Telemetry(store, config);
+    await telemetry.onInstall();
+    const onboarding = new OnboardingBot(config.telegramBotToken, config.ownerIds, store);
+    await onboarding.start();
+    logger.info('running in onboarding mode', { missing: missingSetup(config) });
+    return; // long-polling keeps the process alive
+  }
   const caddy = new CaddyClient(config.caddyAdminUrl ?? 'unix:/run/caddy/admin.sock');
   const agentImage = config.agent?.image ?? process.env.BOTSMAN_IMAGE ?? 'botsman';
 
@@ -102,7 +123,7 @@ async function main(): Promise<void> {
     fs.writeFileSync(tokenFile, controlToken + '\n', { mode: 0o600 });
   }
 
-  const deployEngine = new DockerDeployEngine(docker, caddy, config.baseDomain);
+  const deployEngine = new DockerDeployEngine(docker, caddy, config.baseDomain!);
   const controlUrl = process.env.BOTSMAN_CONTROL_URL ?? `http://127.0.0.1:${CONTROL_PORT}`;
   // LLM-based slug naming: Messages API with an API key, a one-turn claude
   // CLI call with a subscription token; heuristic fallback inside on errors.
@@ -114,7 +135,7 @@ async function main(): Promise<void> {
       ? (description: string) => suggestSlugCLI(oauth, description)
       : undefined;
   const orchestrator = new Orchestrator(
-    store, agent, deployEngine, pgAdmin, config.baseDomain, controlUrl, controlToken, telemetry,
+    store, agent, deployEngine, pgAdmin, config.baseDomain!, controlUrl, controlToken, telemetry,
     suggestName,
   );
 
@@ -132,6 +153,14 @@ async function main(): Promise<void> {
   }
   if (reconcileNotes.length) {
     await gateway.notifyOwner('ℹ️ Cleaned up state after a restart:\n- ' + reconcileNotes.join('\n- '));
+  }
+  // First start after in-chat onboarding — tell the owner we are ready to work.
+  if (store.kvGet(READY_NOTIFY_KEY)) {
+    store.kvSet(READY_NOTIFY_KEY, '');
+    await gateway.notifyOwner(
+      '🚀 Ready! Describe your first service, for example:\n' +
+      '"make a TODO service with a task list and the ability to mark tasks done"',
+    );
   }
   logger.info('botsman started');
 
