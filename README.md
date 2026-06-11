@@ -26,7 +26,7 @@ You (Telegram):
    price hourly and pings me on Telegram if it drops."
 
 Botsman (a few minutes later):
-  ✓ price-watcher.apps.yourdomain.com — deployed
+  ✓ price-watcher.yourdomain.com — deployed
   ✓ Database created
   ✓ Checks passed
   [link]  [screenshot of the running page]
@@ -57,7 +57,7 @@ Under the hood:
 ## Requirements
 
 - A Linux VPS (Ubuntu 22.04 or 24.04), 2 vCPU / 4 GB RAM is a comfortable starting point.
-- A domain with a **wildcard DNS record** pointing at your server, e.g. `*.apps.yourdomain.com → <your server IP>`.
+- A domain with a **wildcard DNS record** pointing at your server, e.g. `*.yourdomain.com → <your server IP>`.
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather)) and your Telegram user ID.
 - Auth for the coding agent — either of:
   - your **Claude subscription** (Pro/Max): generate a token with `claude setup-token` on a machine where you're logged into Claude Code — no extra API bills, usage counts against your plan limits;
@@ -67,7 +67,7 @@ Under the hood:
 
 ## Quick start
 
-Have a domain ready: each project gets its own subdomain under a base domain you choose (e.g. `apps.yourdomain.com`). The bot will show you the exact wildcard DNS record to create — with this server's IP — and verify it live during setup. On Cloudflare, the record must be **DNS only** (grey cloud).
+Have a domain ready: each project gets its own subdomain under a base domain you choose (e.g. `yourdomain.com` → `todo.yourdomain.com`). The bot shows you the exact wildcard DNS record to create — with this server's IP — and verifies it live during setup. On Cloudflare, the record must be **DNS only** (grey cloud).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
