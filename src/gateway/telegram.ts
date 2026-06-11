@@ -10,6 +10,7 @@ import { updateConfigFile } from '../config.js';
 import { getFocus, setFocus, clearFocus, roomKeyboard, detectRoomSwitch, type Room } from './rooms.js';
 import {
   routeMessage, runReadOp, runMutatingOp, looksOperational, looksLikeQuestion, missingSlugPrompt,
+  runDevOpsConfirm,
   type DevOpsOp, type DevOpsDeps, type Route,
 } from './devops.js';
 import type { StructuredLlm } from '../llm.js';
@@ -269,29 +270,21 @@ export class TelegramGateway {
           await this.bot.api.editMessageText(chatId, entry.messageId, 'Cancelled.').catch(() => {});
           return;
         }
-        // First click on a host-level op → ask for a SECOND confirmation.
-        if (entry.op.hostLevel && !entry.confirmed && data === 'devops:exec') {
-          entry.confirmed = true;
-          await ctx.answerCallbackQuery();
-          const kb = new InlineKeyboard().text('⚠️ Yes, do it', 'devops:exec2').text('✖️ Cancel', 'devops:cancel');
-          await this.bot.api.editMessageText(
-            chatId, entry.messageId,
-            `${entry.op.humanSummary}\n\nThis touches the host. Are you sure?`,
-            { reply_markup: kb },
-          ).catch(() => {});
-          return;
-        }
-        // A host-level op may only run once its first confirm set `confirmed`.
-        // This blocks a crafted/replayed `devops:exec2` from skipping the gate.
-        if (entry.op.hostLevel && !entry.confirmed) {
-          await ctx.answerCallbackQuery({ text: 'Tap Execute first.' });
-          return;
-        }
-        this.pendingDevOps.delete(chatId);
-        await ctx.answerCallbackQuery({ text: 'Working…' });
-        await this.bot.api.editMessageText(chatId, entry.messageId, `⏳ ${entry.op.humanSummary}…`).catch(() => {});
-        const result = await runMutatingOp(entry.op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
-        await this.editMdSafe(chatId, entry.messageId, result);
+        // The whole exec/exec2 gate lives in runDevOpsConfirm (unit-tested);
+        // here we just wire grammy IO to it. `confirmed` is set only after the
+        // warning renders, so a failed edit can't collapse the double-confirm.
+        await runDevOpsConfirm(entry, data, {
+          answer: (text) => ctx.answerCallbackQuery(text ? { text } : undefined).then(() => {}),
+          renderWarning: (text) => {
+            const kb = new InlineKeyboard().text('⚠️ Yes, do it', 'devops:exec2').text('✖️ Cancel', 'devops:cancel');
+            return this.bot.api.editMessageText(chatId, entry.messageId, text, { reply_markup: kb })
+              .then(() => true).catch(() => false);
+          },
+          showRunning: (text) => this.bot.api.editMessageText(chatId, entry.messageId, text).then(() => {}).catch(() => {}),
+          execute: () => runMutatingOp(entry.op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`),
+          showResult: (text) => this.editMdSafe(chatId, entry.messageId, text),
+          clearPending: () => this.pendingDevOps.delete(chatId),
+        });
         return;
       }
 

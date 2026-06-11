@@ -46,6 +46,60 @@ export interface DevOpsOp {
   hostLevel: boolean;
 }
 
+/** Mutable confirm state for one pending DevOps op (kept server-side per chat). */
+export interface PendingDevOps {
+  op: DevOpsOp;
+  /** True only once a host-level op's second-confirm warning is actually on screen. */
+  confirmed: boolean;
+}
+
+/** IO seam for the confirm state machine — real impl wraps grammy; tests inject fakes. */
+export interface ConfirmIO {
+  /** answer the callback query (optional toast text). */
+  answer: (text?: string) => Promise<void>;
+  /** render the host "are you sure?" warning + second-confirm keyboard; return true iff it rendered. */
+  renderWarning: (text: string) => Promise<boolean>;
+  /** show the "⏳ running" state. */
+  showRunning: (text: string) => Promise<void>;
+  /** actually run the op; returns the result text. */
+  execute: () => Promise<string>;
+  /** render the final result. */
+  showResult: (text: string) => Promise<void>;
+  /** drop the pending entry (single-flight). */
+  clearPending: () => void;
+}
+
+/**
+ * DevOps confirm state machine (cancel handled by the caller). Host-level ops
+ * need TWO confirms; `confirmed` is set ONLY after the warning is actually
+ * rendered, so a failed edit can never collapse the gate into a double-tap of
+ * the still-visible Execute button. Execution is gated on `confirmed` for host
+ * ops — never on the callback-data string — so a crafted/replayed `exec2`
+ * can't skip the warning.
+ */
+export async function runDevOpsConfirm(entry: PendingDevOps, data: string, io: ConfirmIO): Promise<void> {
+  if (entry.op.hostLevel && !entry.confirmed) {
+    if (data !== 'devops:exec') {
+      // exec2 (or anything) before the warning was ever shown → reject.
+      await io.answer('Tap Execute first.');
+      return;
+    }
+    const rendered = await io.renderWarning(
+      `${entry.op.humanSummary}\n\nThis touches the host. Are you sure?`,
+    );
+    if (rendered) entry.confirmed = true; // only once the warning is on screen
+    await io.answer(rendered ? undefined : 'Please tap Execute again to confirm.');
+    return;
+  }
+  // Non-host mutating op (single confirm), or host op whose 2nd confirm landed.
+  entry.confirmed = true;
+  io.clearPending();
+  await io.answer('Working…');
+  await io.showRunning(`⏳ ${entry.op.humanSummary}…`);
+  const result = await io.execute();
+  await io.showResult(result);
+}
+
 export interface DevOpsDeps {
   store: Store;
   docker: Dockerode;

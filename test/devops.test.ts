@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   routeMessage, looksOperational, looksLikeQuestion, OP_META, summarize,
+  runDevOpsConfirm, type ConfirmIO, type PendingDevOps, type DevOpsOp,
 } from '../src/gateway/devops.js';
 import type { StructuredLlm } from '../src/llm.js';
 
@@ -100,5 +101,70 @@ describe('routeMessage', () => {
 
   it('every op id has catalog metadata and a summary', () => {
     for (const id of Object.keys(OP_META)) expect(summarize(id as never)).toBeTruthy();
+  });
+});
+
+describe('runDevOpsConfirm (host-op double-confirm state machine)', () => {
+  function hostOp(): DevOpsOp {
+    return { op: 'host_update', humanSummary: 'Update the host', mutating: true, hostLevel: true };
+  }
+  function nonHostOp(): DevOpsOp {
+    return { op: 'restart_service', slug: 'todo', humanSummary: 'Restart todo', mutating: true, hostLevel: false };
+  }
+  function fakeIO(renderResult = true) {
+    const calls = { answers: [] as (string | undefined)[], executed: 0, warned: 0, cleared: 0, results: [] as string[] };
+    const io: ConfirmIO = {
+      answer: async (t) => { calls.answers.push(t); },
+      renderWarning: async () => { calls.warned++; return renderResult; },
+      showRunning: async () => {},
+      execute: async () => { calls.executed++; return 'done'; },
+      showResult: async (t) => { calls.results.push(t); },
+      clearPending: () => { calls.cleared++; },
+    };
+    return { io, calls };
+  }
+
+  it('(a) exec2 on a fresh host op must NOT execute (crafted/replayed exec2)', async () => {
+    const entry: PendingDevOps = { op: hostOp(), confirmed: false };
+    const { io, calls } = fakeIO();
+    await runDevOpsConfirm(entry, 'devops:exec2', io);
+    expect(calls.executed).toBe(0);
+    expect(calls.warned).toBe(0);
+    expect(entry.confirmed).toBe(false);
+    expect(calls.answers).toContain('Tap Execute first.');
+  });
+
+  it('(b) normal two-step host flow executes exactly once', async () => {
+    const entry: PendingDevOps = { op: hostOp(), confirmed: false };
+    const { io, calls } = fakeIO(true);
+    await runDevOpsConfirm(entry, 'devops:exec', io);   // first tap → warning
+    expect(calls.warned).toBe(1);
+    expect(calls.executed).toBe(0);
+    expect(entry.confirmed).toBe(true);
+    await runDevOpsConfirm(entry, 'devops:exec2', io);  // second tap → run
+    expect(calls.executed).toBe(1);
+    expect(calls.cleared).toBe(1);
+  });
+
+  it('(c) a failed first-confirm edit does NOT collapse the double-confirm', async () => {
+    const entry: PendingDevOps = { op: hostOp(), confirmed: false };
+    const fail = fakeIO(false); // renderWarning returns false (edit failed)
+    await runDevOpsConfirm(entry, 'devops:exec', fail.io);
+    expect(entry.confirmed).toBe(false);            // not marked confirmed
+    expect(fail.calls.executed).toBe(0);
+    expect(fail.calls.answers).toContain('Please tap Execute again to confirm.');
+    // A re-tap of the still-visible Execute re-attempts the warning, never executes.
+    const ok = fakeIO(true);
+    await runDevOpsConfirm(entry, 'devops:exec', ok.io);
+    expect(entry.confirmed).toBe(true);
+    expect(ok.calls.executed).toBe(0);              // still not executed without exec2
+  });
+
+  it('non-host mutating op keeps single-confirm (executes on first exec)', async () => {
+    const entry: PendingDevOps = { op: nonHostOp(), confirmed: false };
+    const { io, calls } = fakeIO();
+    await runDevOpsConfirm(entry, 'devops:exec', io);
+    expect(calls.warned).toBe(0);
+    expect(calls.executed).toBe(1);
   });
 });
