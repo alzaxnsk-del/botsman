@@ -5,6 +5,26 @@ import type { Orchestrator } from './orchestrator.js';
 export const CONTROL_PORT = 8366;
 
 /**
+ * Minimal /health server for ONBOARDING mode (before the full control server
+ * exists). Lets the installer's healthcheck see a live daemon instead of
+ * timing out with a scary error while the user finishes setup in Telegram.
+ */
+export function startHealthServer(port = CONTROL_PORT): http.Server {
+  const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && (req.url ?? '') === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, mode: 'onboarding' }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  server.listen(port, '0.0.0.0');
+  logger.info('health server listening (onboarding mode)', { port });
+  return server;
+}
+
+/**
  * Control API: used by git post-receive hooks (push-to-deploy, AC-E1) and as
  * a daemon healthcheck. Published on the host as 127.0.0.1 only, but the
  * daemon is attached to project networks (for smoke-checks), so deployed
