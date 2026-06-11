@@ -34,6 +34,12 @@ export interface DeployEngine {
   containerRunning(slug: string): Promise<boolean>;
   /** Remove stale per-commit images, keeping the listed tags (current + prev). */
   cleanupImages(slug: string, keep: Array<string | null | undefined>): Promise<void>;
+  /** One-shot internal HTTP probe of the running service (for /doctor). */
+  probeInternal(slug: string): Promise<{ ok: boolean; detail: string }>;
+  /** Restart the service container (one-tap fix in /doctor). */
+  restartService(slug: string): Promise<void>;
+  /** Restart the reverse proxy — retries TLS issuance immediately (one-tap fix). */
+  restartProxy(): Promise<void>;
 }
 
 /**
@@ -192,6 +198,30 @@ export class DockerDeployEngine implements DeployEngine {
   async containerRunning(slug: string): Promise<boolean> {
     const names = await this.findProjectContainers(slug, true);
     return names.length > 0;
+  }
+
+  async probeInternal(slug: string): Promise<{ ok: boolean; detail: string }> {
+    const names = await this.findProjectContainers(slug, true);
+    if (!names.length) return { ok: false, detail: 'no running container' };
+    const res = await smokeCheck(`http://${names[0]}:${SERVICE_PORT}/`, {
+      timeoutMs: 10_000,
+      intervalMs: 2_500,
+    });
+    return res.ok
+      ? { ok: true, detail: 'HTTP 200' }
+      : { ok: false, detail: res.error ?? `HTTP ${res.status}` };
+  }
+
+  async restartService(slug: string): Promise<void> {
+    for (const name of await this.findProjectContainers(slug)) {
+      await this.docker.getContainer(name).restart({ t: 5 }).catch(() => {});
+    }
+  }
+
+  async restartProxy(): Promise<void> {
+    // Caddy reloads its autosaved config on start (--resume) and immediately
+    // re-attempts certificate issuance for every configured host.
+    await this.docker.getContainer(CADDY_CONTAINER).restart({ t: 5 });
   }
 
   async containerLogs(slug: string, lines = 50): Promise<string> {
