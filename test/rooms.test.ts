@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Store } from '../src/db.js';
-import { getRoom, setRoom, roomLabel, detectRoomSwitch } from '../src/gateway/rooms.js';
+import { getFocus, setFocus, clearFocus, detectRoomSwitch } from '../src/gateway/rooms.js';
 import type { ProjectMeta } from '../src/types.js';
 
 function sampleProject(slug: string): Omit<ProjectMeta, 'createdAt' | 'updatedAt'> {
@@ -17,37 +17,30 @@ beforeEach(() => {
   store = new Store(':memory:');
 });
 
-describe('room state', () => {
-  it('defaults to home', () => {
-    expect(getRoom(store, 1)).toEqual({ kind: 'home' });
+describe('focus state', () => {
+  it('defaults to no focus', () => {
+    expect(getFocus(store, 1)).toBeNull();
   });
 
-  it('round-trips devops and project rooms', () => {
-    setRoom(store, 1, { kind: 'devops' });
-    expect(getRoom(store, 1)).toEqual({ kind: 'devops' });
+  it('round-trips a focused project', () => {
     store.createProject(sampleProject('todo'));
-    setRoom(store, 1, { kind: 'project', slug: 'todo' });
-    expect(getRoom(store, 1)).toEqual({ kind: 'project', slug: 'todo' });
+    setFocus(store, 1, 'todo');
+    expect(getFocus(store, 1)).toBe('todo');
+    clearFocus(store, 1);
+    expect(getFocus(store, 1)).toBeNull();
   });
 
-  it('self-heals a project room whose slug was deleted', () => {
+  it('self-heals focus on a deleted project', () => {
     store.createProject(sampleProject('todo'));
-    setRoom(store, 1, { kind: 'project', slug: 'todo' });
+    setFocus(store, 1, 'todo');
     store.deleteProject('todo');
-    expect(getRoom(store, 1)).toEqual({ kind: 'home' });
+    expect(getFocus(store, 1)).toBeNull();
   });
 
-  it('keeps rooms separate per chat', () => {
-    setRoom(store, 1, { kind: 'devops' });
-    expect(getRoom(store, 2)).toEqual({ kind: 'home' });
-  });
-});
-
-describe('roomLabel', () => {
-  it('labels each room', () => {
-    expect(roomLabel({ kind: 'home' })).toBe('🏠 Home');
-    expect(roomLabel({ kind: 'devops' })).toBe('🛠 Server');
-    expect(roomLabel({ kind: 'project', slug: 'todo' })).toBe('📦 todo');
+  it('keeps focus separate per chat', () => {
+    store.createProject(sampleProject('todo'));
+    setFocus(store, 1, 'todo');
+    expect(getFocus(store, 2)).toBeNull();
   });
 });
 

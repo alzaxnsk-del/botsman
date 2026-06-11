@@ -55,51 +55,107 @@ export interface DevOpsDeps {
   hostRepoDir: string;
 }
 
-const ROUTER_SYSTEM = `You are the DevOps router for a self-hosted deploy system. Map the user's message to ONE operation from this fixed list and reply with ONLY a JSON object {"op": "<id>", "slug": "<project-slug-or-empty>"}.
+/**
+ * Cheap deterministic guard: does the message look like a SERVER/operations
+ * request rather than authoring? Used to (a) skip the create/edit fast-path and
+ * (b) pick the right fallback when the LLM is unavailable. It only decides
+ * "this is operational, ask the catalog" — never the action itself.
+ */
+// Liberal on purpose: a false positive only costs one LLM call (the router
+// then re-classifies correctly); a false NEGATIVE is dangerous because it lets
+// the no-LLM fast-path auto-deploy an op as a code edit. So over-match.
+const OP_VERBS = /(^|\s)(restart|reboot|redeploy|re-?deploy|rebuild|roll\s?back|logs?|metrics|load|cpu|ram|memory|disk|doctor|diagnose|prune|clean\s?up|update|upgrade|stop|kill|pause|shut\s?down|take\s?down|turn\s?off|bounce|disable|status|перезапус|перезагруз|передепло|пересобер|откат|логи?|нагрузк|памят|диск|диагност|очист|обнов|останов|выключ|пауз|статус)/i;
+const PROXY_TLS = /(proxy|tls|ssl|cert|сертификат|прокси)/i;
 
-Operations:
-- host_metrics: show server load, memory, disk
-- container_stats: show running containers and their CPU/RAM
-- service_logs: show a project's recent logs (needs slug)
-- service_doctor: diagnose a project's health (needs slug)
-- project_list: list all projects and statuses
-- restart_service: restart a project's container (needs slug)
-- redeploy_service: rebuild and redeploy a project (needs slug)
-- rollback_service: roll a project back to its previous version (needs slug)
-- restart_proxy: restart the reverse proxy (re-issues TLS)
-- prune_docker: reclaim docker disk space
-- self_update: update Botsman itself from git and restart
-- host_update: update the host OS packages (apt upgrade)
+export function looksOperational(text: string): boolean {
+  return OP_VERBS.test(text) || PROXY_TLS.test(text);
+}
 
-Pick the single best match. If a slug is referenced, copy it exactly; otherwise use "". If nothing matches, reply {"op":"none"}.`;
+// --- unified message router (soft context) ---------------------------------
 
-interface RouterReply { op: string; slug?: string }
+export type Route =
+  | { kind: 'create'; description: string }
+  | { kind: 'edit'; slug: string; instruction: string }
+  | { kind: 'question'; slug: string; question: string }
+  | { kind: 'devops'; op: DevOpsOp }
+  | { kind: 'none' };
+
+const ROUTER_SYSTEM = `You route a message in a self-hosted "describe a web service → it gets built and deployed" system. Reply with ONLY a JSON object choosing exactly one action.
+
+Actions:
+- {"kind":"create"} — the user wants a NEW service built from a description.
+- {"kind":"edit","slug":"<project>"} — CHANGE an existing service (add/fix/remove a feature, restyle, change behavior).
+- {"kind":"question","slug":"<project>"} — ASK about an existing service (how it works, its status, what's in the logs) WITHOUT changing it.
+- {"kind":"devops","op":"<id>","slug":"<project-or-empty>"} — a SERVER/operations action. op is one of:
+    host_metrics (server load/mem/disk), container_stats, service_logs (slug), service_doctor (slug),
+    project_list, restart_service (slug), redeploy_service (slug), rollback_service (slug),
+    restart_proxy, prune_docker (reclaim disk), self_update (update Botsman), host_update (apt upgrade).
+
+Rules: pick the single best action. Copy a referenced project slug exactly from the list; if the user clearly means the focused project but doesn't name it, use it; otherwise use "". If nothing fits, reply {"kind":"none"}.`;
+
+interface RouterReply { kind: string; op?: string; slug?: string }
 
 function validateRouterReply(raw: unknown): RouterReply | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const r = raw as Record<string, unknown>;
-  if (typeof r.op !== 'string') return null;
-  return { op: r.op, slug: typeof r.slug === 'string' ? r.slug : undefined };
+  if (typeof r.kind !== 'string') return null;
+  return {
+    kind: r.kind,
+    op: typeof r.op === 'string' ? r.op : undefined,
+    slug: typeof r.slug === 'string' ? r.slug : undefined,
+  };
 }
 
-/** Free text → a validated DevOpsOp, or null (caller shows the op menu). */
-export async function routeDevOps(
+/**
+ * One LLM call mapping free text → a routed action. Reused for the whole
+ * "ambiguous tail" (authoring that the heuristic couldn't classify, or anything
+ * operational). Returns {kind:'none'} on failure so the caller can fall back.
+ * Confirmation policy for devops ops is always re-derived from OP_META, never
+ * from the model.
+ */
+export async function routeMessage(
   llm: StructuredLlm,
   text: string,
   slugs: string[],
-): Promise<DevOpsOp | null> {
+  focusedSlug: string | null,
+): Promise<Route> {
   const reply = await llm({
     system: ROUTER_SYSTEM,
-    user: `Projects: ${slugs.join(', ') || '(none)'}\nMessage: ${text}`,
+    user: `Projects: ${slugs.join(', ') || '(none)'}\nFocused project: ${focusedSlug ?? '(none)'}\nMessage: ${text}`,
     validate: validateRouterReply,
   });
-  if (!reply) return null;
-  const op = reply.op as DevOpsOpId;
-  if (!OP_IDS.includes(op)) return null; // includes "none" and any hallucinated id
-  const meta = OP_META[op];
-  // Trust the catalog, not the model, for mutating/hostLevel.
-  const slug = meta.needsSlug ? (reply.slug && slugs.includes(reply.slug) ? reply.slug : undefined) : undefined;
-  return { op, slug, mutating: meta.mutating, hostLevel: meta.hostLevel, humanSummary: summarize(op, slug) };
+  if (!reply) return { kind: 'none' };
+
+  const resolveSlug = (raw?: string): string | undefined => {
+    if (raw && slugs.includes(raw)) return raw;
+    if (focusedSlug && slugs.includes(focusedSlug)) return focusedSlug;
+    return undefined;
+  };
+
+  switch (reply.kind) {
+    case 'create':
+      return { kind: 'create', description: text };
+    case 'edit': {
+      const slug = resolveSlug(reply.slug);
+      return slug ? { kind: 'edit', slug, instruction: text } : { kind: 'none' };
+    }
+    case 'question': {
+      const slug = resolveSlug(reply.slug);
+      return slug ? { kind: 'question', slug, question: text } : { kind: 'none' };
+    }
+    case 'devops': {
+      const op = reply.op as DevOpsOpId;
+      if (!OP_IDS.includes(op)) return { kind: 'none' };
+      const meta = OP_META[op];
+      const slug = meta.needsSlug ? resolveSlug(reply.slug) : undefined;
+      return {
+        kind: 'devops',
+        op: { op, slug, mutating: meta.mutating, hostLevel: meta.hostLevel, humanSummary: summarize(op, slug) },
+      };
+    }
+    default:
+      return { kind: 'none' };
+  }
 }
 
 export function summarize(op: DevOpsOpId, slug?: string): string {
@@ -223,31 +279,16 @@ function cpuPercent(s: DockerStats): number {
   return sysDelta > 0 && cpuDelta > 0 ? (cpuDelta / sysDelta) * cpus * 100 : 0;
 }
 
-// --- project-room edit/question router -------------------------------------
-
-export type ProjectRoute =
-  | { kind: 'edit'; instruction: string }
-  | { kind: 'question'; question: string };
-
-const PROJECT_SYSTEM = `You classify a message about an existing deployed web service. Reply with ONLY {"kind":"edit"} or {"kind":"question"}.
-- "edit": the user wants to CHANGE the service (add/remove/fix a feature, change text, style, behavior).
-- "question": the user is ASKING about it (how it works, its status, what's in the logs, why something happens) without requesting a change.`;
-
 /**
- * Decide whether a project-room message is an edit or a question. Falls back to
- * 'edit' on any LLM failure — preserving the core flow (a misrouted question
- * degrades to a harmless no-op edit, which editProject handles gracefully).
+ * Cheap deterministic guard: does the message read as a QUESTION rather than an
+ * imperative change? Keeps the edit hot-path ("add a dark theme") LLM-free
+ * while sending questions ("how does this work?") to the router.
  */
-export async function routeProjectMessage(llm: StructuredLlm | undefined, text: string): Promise<ProjectRoute> {
-  if (!llm) return { kind: 'edit', instruction: text };
-  const reply = await llm({
-    system: PROJECT_SYSTEM,
-    user: text,
-    validate: (raw): { kind: 'edit' | 'question' } | null => {
-      const k = (raw as { kind?: unknown })?.kind;
-      return k === 'edit' || k === 'question' ? { kind: k } : null;
-    },
-  });
-  if (reply?.kind === 'question') return { kind: 'question', question: text };
-  return { kind: 'edit', instruction: text };
+// Liberal like looksOperational: false positives are harmless (→ LLM router),
+// false negatives let a question fast-path into an unwanted code edit.
+const QUESTION_START = /^(how|what|why|when|where|which|who|does|do|is|are|can|could|would|should|tell me|explain|show me|describe|walk me through|как|что|почему|зачем|когда|где|какой|какая|сколько|умеет|правда|расскажи|объясни|покажи|опиши)/i;
+
+export function looksLikeQuestion(text: string): boolean {
+  const t = text.trim();
+  return t.endsWith('?') || QUESTION_START.test(t);
 }

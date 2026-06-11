@@ -96,13 +96,16 @@ Full setup, including the DNS wildcard record, is in [docs/install.md](docs/inst
 | `/delete <project>` | Stop and remove a project (asks for confirmation) |
 | `/server` `/projects` `/home` | Switch rooms (see below) |
 
-### Rooms
+### Talking to Botsman
 
-Persistent buttons under the message box switch between three ways of talking to Botsman:
+There are no modes to remember — just write what you want and Botsman routes it by meaning:
 
-- **🏠 Home** — create and change services (the default flow).
-- **🛠 Server** — a DevOps assistant you talk to in plain language: "show the load", "clean up disk", "restart todo", "redeploy todo", "update the server". Read actions (metrics, logs, diagnosis) run immediately; anything that changes state asks for a one-tap confirmation — host-level actions (OS update, Botsman self-update) ask twice.
-- **📦 Projects** — enter a project and keep developing in chat. A message is routed as either a **change** ("add a dark theme" → redeploys) or a **question** ("how is this built?", "what's in the logs?" → answered without deploying).
+- **Build** — "make a TODO app" → creates and deploys a new service.
+- **Change** — "add a dark theme" → edits the service you're working on and redeploys.
+- **Ask** — "how is this built?", "what's in the logs?" → answered without deploying.
+- **Operate the server** — "show the load", "clean up disk", "restart todo", "redeploy todo", "update the server" → server ops. Reads run immediately; anything that changes state asks for a one-tap confirmation, and host-level actions (OS update, Botsman self-update) ask twice.
+
+The persistent buttons below the message box are optional shortcuts: **🏠** resets the focus, **🛠 Server** shows what you can ask about the server, **📦 Projects** focuses a project so bare follow-ups ("make it bigger") land on it. Routing never depends on a mode — the same sentence means the same thing wherever you type it.
 
 ---
 
