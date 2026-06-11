@@ -10,19 +10,21 @@ You need:
 1. **A VPS** — Ubuntu 22.04 or 24.04, 2 vCPU / 4 GB RAM, 40+ GB disk, ports 80
    and 443 open.
 2. **A wildcard DNS record.** Pick a base domain for your services, e.g.
-   `apps.example.com`. In your DNS provider's control panel create one record:
+   `example.com`. In your DNS provider's control panel create one record:
 
    | Type | Host / Name | Value |
    |---|---|---|
-   | A | `*.apps` (or `*` if the whole domain is for Botsman) | `<your server's public IP>` |
+   | A | `*` | `<your server's public IP>` |
 
-   This makes *every* subdomain (`todo.apps.example.com`,
-   `price-watcher.apps.example.com`, …) resolve to your server, so each
-   deployed project gets its own address with no extra DNS work. Without it
-   links and TLS will not work. Verify (may take a few minutes to propagate):
+   This makes *every* subdomain (`todo.example.com`,
+   `price-watcher.example.com`, …) resolve to your server, so each
+   deployed project gets its own address with no extra DNS work. (If the domain
+   is shared with a website, use a sub-base like `apps.example.com` with host
+   `*.apps` instead.) Without it links and TLS will not work. Verify (may take a
+   few minutes to propagate):
 
    ```bash
-   dig +short anything.apps.example.com   # → your server IP
+   dig +short anything.example.com   # → your server IP
    ```
 
    The setup wizard also checks the record and warns if it does not resolve.
@@ -98,7 +100,7 @@ Edit `~/.botsman/config.json`, then `docker compose restart botsman`.
 | `ownerIds` | yes | array of whitelisted Telegram user IDs |
 | `anthropicApiKey` | one of the two | pay-per-use API key (`sk-ant-api…`) |
 | `claudeCodeOauthToken` | one of the two | Claude subscription token from `claude setup-token` (`sk-ant-oat…`); wins if both are set |
-| `baseDomain` | set in chat | e.g. `apps.example.com`; collected during in-chat onboarding |
+| `baseDomain` | set in chat | e.g. `example.com`; collected during in-chat onboarding |
 | `telemetry.enabled` | no | default `false`; see below |
 | `telemetry.endpoint` | no | without it nothing is ever sent, even if enabled |
 | `agent.maxTurns` | no | agent iteration cap per task (default 60) |

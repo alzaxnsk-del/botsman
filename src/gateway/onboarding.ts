@@ -139,10 +139,11 @@ export class OnboardingBot {
       const ip = await serverPublicIp();
       await ctx.reply(
         '*Step 2 of 3 · Domain*\n\n' +
-        'Send me the base domain for your services, e.g. `apps.example.com`.\n' +
-        'Every project will get its own subdomain: `todo.apps.example.com`.\n\n' +
+        'Send me the base domain for your services, e.g. `example.com`.\n' +
+        'Every project gets its own subdomain: `todo.example.com`.\n\n' +
         'First create a wildcard A-record at your DNS provider:\n' +
-        `\`\`\`\ntype  A\nhost  *.apps   (or * if the whole domain is for Botsman)\nvalue ${ip ?? '<this server\'s IP>'}\n\`\`\`\n` +
+        `\`\`\`\ntype  A\nhost  *\nvalue ${ip ?? '<this server\'s IP>'}\n\`\`\`\n` +
+        '(If the domain is shared, use a sub-base like `apps.example.com` with host `*.apps` instead.)\n' +
         '⚠️ On Cloudflare the record must be *DNS only* (grey cloud), not Proxied.',
         { parse_mode: 'Markdown' },
       );
@@ -199,7 +200,7 @@ export class OnboardingBot {
 
   private async tryDomain(ctx: Context, domain: string): Promise<void> {
     if (!isValidDomain(domain)) {
-      await ctx.reply('That does not look like a domain. Send something like `apps.example.com`.', { parse_mode: 'Markdown' });
+      await ctx.reply('That does not look like a domain. Send something like `example.com`.', { parse_mode: 'Markdown' });
       return;
     }
     const probe = `botsman-dns-probe.${domain}`;
