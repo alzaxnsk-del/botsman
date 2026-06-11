@@ -86,6 +86,22 @@ describe('routeMessage', () => {
     }
   });
 
+  it('carries low confidence so the gateway can confirm an uncertain edit', async () => {
+    const r = await routeMessage(stubLlm({ kind: 'edit', slug: 'todo', confidence: 'low' }), 'review it', ['todo'], null);
+    expect(r).toEqual({ kind: 'edit', slug: 'todo', instruction: 'review it', confidence: 'low' });
+  });
+
+  it('suppresses the confirm when the user is CONNECTED to that project', async () => {
+    const r = await routeMessage(stubLlm({ kind: 'edit', slug: 'todo', confidence: 'low' }), 'review it', ['todo'], 'todo');
+    expect(r.kind).toBe('edit');
+    if (r.kind === 'edit') expect(r.confidence).toBeUndefined(); // connected = trust it
+  });
+
+  it('flags a low-confidence create for confirmation', async () => {
+    const r = await routeMessage(stubLlm({ kind: 'create', confidence: 'low' }), 'tamagotchi review', ['tamagotchi-web-app'], null);
+    expect(r).toEqual({ kind: 'create', description: 'tamagotchi review', confidence: 'low' });
+  });
+
   it('returns none for an unknown op or kind', async () => {
     expect((await routeMessage(stubLlm({ kind: 'devops', op: 'rm_rf' }), 'x', [], null)).kind).toBe('none');
     expect((await routeMessage(stubLlm({ kind: 'whatever' }), 'x', [], null)).kind).toBe('none');

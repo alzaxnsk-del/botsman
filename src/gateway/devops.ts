@@ -128,13 +128,13 @@ export function looksOperational(text: string): boolean {
 // --- unified message router (soft context) ---------------------------------
 
 export type Route =
-  | { kind: 'create'; description: string }
-  | { kind: 'edit'; slug: string; instruction: string }
-  | { kind: 'question'; slug: string; question: string }
+  | { kind: 'create'; description: string; confidence?: 'low' }
+  | { kind: 'edit'; slug: string; instruction: string; confidence?: 'low' }
+  | { kind: 'question'; slug: string; question: string; confidence?: 'low' }
   | { kind: 'devops'; op: DevOpsOp }
   | { kind: 'none' };
 
-const ROUTER_SYSTEM = `You route a message in a self-hosted "describe a web service → it gets built and deployed" system. Reply with ONLY a JSON object choosing exactly one action.
+const ROUTER_SYSTEM = `You route a message in a self-hosted "describe a web service → it gets built and deployed" system. Reply with ONLY a JSON object: {"kind":…, "slug":"<project-or-empty>", "op":"<id-or-omit>", "confidence":"high"|"low"}.
 
 Actions:
 - {"kind":"create"} — the user wants a NEW service built from a description.
@@ -149,9 +149,11 @@ Rules:
 - Pick the single best action. Copy a referenced project slug EXACTLY from the list.
 - A message about fixing, reviewing, improving, or reporting a problem ("it's broken", "crashes", "white screen", "works poorly") with an EXISTING service is an EDIT (or question) of THAT service — NOT a new project. Choose "create" ONLY for a clearly new, different service.
 - Project references may be fuzzy or transliterated — e.g. «тамагочи» / "tamagochi" refers to an existing "tamagotchi-web-app". Match the message to the closest existing project before considering create.
-- If the user clearly means the focused project but doesn't name it, use it; otherwise use "". If nothing fits, reply {"kind":"none"}.`;
+- If a project is CONNECTED (see below), the user is actively working on it: edits and questions almost always refer to it — use it and set confidence "high".
+- confidence: "high" when you are sure. "low" when you are NOT sure whether it is a new project vs a change to an existing one, or which project it refers to. When unsure, still give your best guess for kind/slug but mark confidence "low" so the system can confirm.
+- If the user clearly means the connected project but doesn't name it, use it; otherwise use "". If nothing fits, reply {"kind":"none"}.`;
 
-interface RouterReply { kind: string; op?: string; slug?: string }
+interface RouterReply { kind: string; op?: string; slug?: string; confidence?: 'high' | 'low' }
 
 function validateRouterReply(raw: unknown): RouterReply | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -161,6 +163,7 @@ function validateRouterReply(raw: unknown): RouterReply | null {
     kind: r.kind,
     op: typeof r.op === 'string' ? r.op : undefined,
     slug: typeof r.slug === 'string' ? r.slug : undefined,
+    confidence: r.confidence === 'low' ? 'low' : 'high',
   };
 }
 
@@ -179,7 +182,7 @@ export async function routeMessage(
 ): Promise<Route> {
   const reply = await llm({
     system: ROUTER_SYSTEM,
-    user: `Projects: ${slugs.join(', ') || '(none)'}\nFocused project: ${focusedSlug ?? '(none)'}\nMessage: ${text}`,
+    user: `Projects: ${slugs.join(', ') || '(none)'}\nConnected project: ${focusedSlug ?? '(none)'}\nMessage: ${text}`,
     validate: validateRouterReply,
   });
   if (!reply) return { kind: 'none' };
@@ -189,17 +192,21 @@ export async function routeMessage(
     if (focusedSlug && slugs.includes(focusedSlug)) return focusedSlug;
     return undefined;
   };
+  // A low-confidence guess on a project the user is CONNECTED to is treated as
+  // confident — connecting is the explicit "stop asking me" signal.
+  const conf = (slug?: string): 'low' | undefined =>
+    reply.confidence === 'low' && slug !== focusedSlug ? 'low' : undefined;
 
   switch (reply.kind) {
     case 'create':
-      return { kind: 'create', description: text };
+      return { kind: 'create', description: text, confidence: reply.confidence === 'low' ? 'low' : undefined };
     case 'edit': {
       const slug = resolveSlug(reply.slug);
-      return slug ? { kind: 'edit', slug, instruction: text } : { kind: 'none' };
+      return slug ? { kind: 'edit', slug, instruction: text, confidence: conf(slug) } : { kind: 'none' };
     }
     case 'question': {
       const slug = resolveSlug(reply.slug);
-      return slug ? { kind: 'question', slug, question: text } : { kind: 'none' };
+      return slug ? { kind: 'question', slug, question: text, confidence: conf(slug) } : { kind: 'none' };
     }
     case 'devops': {
       const op = reply.op as DevOpsOpId;
