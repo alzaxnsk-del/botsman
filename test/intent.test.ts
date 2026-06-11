@@ -1,5 +1,28 @@
 import { describe, it, expect } from 'vitest';
-import { detectIntent, looksLikeCreate } from '../src/intent.js';
+import { detectIntent, looksLikeCreate, findSimilarProject } from '../src/intent.js';
+
+describe('findSimilarProject (near-duplicate create guard)', () => {
+  it('catches the reported case: «ревью тамагочи» ~ tamagotchi-web-app', () => {
+    expect(findSimilarProject('сделай ревью тамагочи, плохо работает', ['tamagotchi-web-app']))
+      .toBe('tamagotchi-web-app');
+  });
+
+  it('matches transliterated / partial names', () => {
+    expect(findSimilarProject('почини тамагочи', ['tamagotchi-web-app'])).toBe('tamagotchi-web-app');
+    expect(findSimilarProject('add to my todo', ['todo-list'])).toBe('todo-list');
+    expect(findSimilarProject('price watcher v2', ['price-watcher'])).toBe('price-watcher');
+  });
+
+  it('does not match unrelated new services', () => {
+    expect(findSimilarProject('сделай магазин обуви', ['tamagotchi-web-app'])).toBeNull();
+    expect(findSimilarProject('make a weather dashboard', ['todo-list', 'price-watcher'])).toBeNull();
+  });
+
+  it('ignores noise tokens (web/app/service/review)', () => {
+    // "review" alone must not match a "*-review" or generic token
+    expect(findSimilarProject('build a service', ['todo-list'])).toBeNull();
+  });
+});
 
 describe('looksLikeCreate', () => {
   it('flags create-phrased messages (kept out of the edit fast-path)', () => {

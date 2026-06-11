@@ -1,3 +1,5 @@
+import { transliterate, STOP_WORDS } from './slug.js';
+
 /**
  * Free-text intent detection (§4 EPIC B). Deliberately simple and explicit,
  * matching the spec's rule: slug mention OR last-project context → edit;
@@ -58,4 +60,43 @@ function escapeRe(s: string): string {
  *  which can tell "make me a shop" from an edit of the focused project). */
 export function looksLikeCreate(text: string): boolean {
   return CREATE_VERBS.test(text.trim().toLowerCase());
+}
+
+const NOISE_TOKENS = new Set(['web', 'app', 'application', 'service', 'api', 'site', 'bot', 'server', 'review', 'app2']);
+
+/**
+ * Before creating, catch the "accidental near-duplicate": a message that names
+ * (even fuzzily / transliterated, e.g. «тамагочи» → tamagotchi-web-app) an
+ * EXISTING project, so the user likely meant to change it, not make a clone.
+ * Returns the similar existing slug, or null.
+ */
+export function findSimilarProject(text: string, slugs: string[]): string | null {
+  const words = transliterate(text)
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/[\s-]+/)
+    .filter((w) => w.length >= 4 && !NOISE_TOKENS.has(w) && !STOP_WORDS.has(w));
+  if (!words.length) return null;
+
+  for (const slug of slugs) {
+    const slugTokens = slug.split('-').filter((t) => t.length >= 4 && !NOISE_TOKENS.has(t));
+    for (const st of slugTokens) {
+      for (const w of words) {
+        if (tokensSimilar(w, st)) return slug;
+      }
+    }
+  }
+  return null;
+}
+
+function tokensSimilar(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length >= 5 && long.includes(short)) return true; // todo ⊂ todolist
+  return sharedPrefix(a, b) >= 6; // tamagochi / tamagotchi → "tamago"
+}
+
+function sharedPrefix(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
 }

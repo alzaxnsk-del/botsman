@@ -25,7 +25,7 @@ export function transliterate(text: string): string {
     .join('');
 }
 
-const STOP_WORDS = new Set(STOP_WORDS_RAW.map(transliterate));
+export const STOP_WORDS = new Set(STOP_WORDS_RAW.map(transliterate));
 
 /** Derive a short kebab-case slug from a service description. */
 export function slugFromDescription(description: string, maxWords = 3): string {

@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../logger.js';
 import { paths } from '../paths.js';
-import { detectIntent, looksLikeCreate } from '../intent.js';
+import { detectIntent, looksLikeCreate, findSimilarProject } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, type FixId } from '../doctor.js';
 import { updateConfigFile } from '../config.js';
@@ -446,7 +446,7 @@ export class TelegramGateway {
     //    project. Operational/question/create-phrased messages fall through.
     if (!looksOperational(text) && !looksLikeQuestion(text)) {
       const intent = detectIntent(text, slugs, focused);
-      if (intent.kind === 'create') return void this.runTask('create', undefined, intent.description, ctx);
+      if (intent.kind === 'create') return void this.createOrAsk(ctx, intent.description, slugs, null);
       if (intent.kind === 'edit' && !looksLikeCreate(text)) {
         return void this.runTask('edit', intent.slug, intent.instruction, ctx);
       }
@@ -460,14 +460,39 @@ export class TelegramGateway {
     await this.dispatchRoute(ctx, route, text, focused, thinking.message_id);
   }
 
+  /**
+   * Create a new project — but if the request names (even fuzzily) an EXISTING
+   * project, ask first: the user probably meant to change it, not clone it
+   * (e.g. «сделай ревью тамагочи» when tamagotchi-web-app already exists).
+   * `thinkingId` is an existing "💭…" message to edit, or null to send fresh.
+   */
+  private async createOrAsk(ctx: Context, description: string, slugs: string[], thinkingId: number | null): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const similar = findSimilarProject(description, slugs);
+    if (!similar) {
+      if (thinkingId) await this.deleteMessage(chatId, thinkingId);
+      return void this.runTask('create', undefined, description, ctx);
+    }
+    const kb = new InlineKeyboard()
+      .text('🆕 New project', 'intent:new')
+      .text(`✏️ Change ${similar}`, `intent:edit:${similar}`);
+    const body = `This looks related to your existing *${similar}*.\nMake a NEW project, or change that one?`;
+    if (thinkingId) {
+      await this.bot.api.editMessageText(chatId, thinkingId, body, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+      this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: description });
+    } else {
+      const sent = await ctx.reply(body, { parse_mode: 'Markdown', reply_markup: kb });
+      this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text: description });
+    }
+  }
+
   private async dispatchRoute(
     ctx: Context, route: Route, text: string, focused: string | null, thinkingId: number,
   ): Promise<void> {
     const chatId = ctx.chat!.id;
     switch (route.kind) {
       case 'create':
-        await this.deleteMessage(chatId, thinkingId);
-        return void this.runTask('create', undefined, route.description, ctx);
+        return void this.createOrAsk(ctx, route.description, this.store.listProjects().map((p) => p.slug), thinkingId);
       case 'edit':
         await this.deleteMessage(chatId, thinkingId);
         return void this.runTask('edit', route.slug, route.instruction, ctx);
