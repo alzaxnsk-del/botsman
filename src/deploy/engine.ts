@@ -82,7 +82,9 @@ export class DockerDeployEngine implements DeployEngine {
     const { slug } = project;
     const dir = paths.projectDir(slug);
     const image = this.imageTag(slug, commit);
-    const name = this.containerName(slug, commit);
+    // Unique per deploy: redeploying the same commit (e.g. a git push with no
+    // new changes) must not collide with the running container's name.
+    const name = `${this.containerName(slug, commit)}-${Date.now().toString(36).slice(-4)}`;
     const host = this.hostFor(slug);
     const db: ProjectDb = { dbName: project.dbName, dbUser: project.dbUser, dbPassword: project.dbPassword };
 
