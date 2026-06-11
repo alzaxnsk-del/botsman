@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { PassThrough } from 'node:stream';
 import type Dockerode from 'dockerode';
 import { logger } from '../logger.js';
@@ -26,6 +28,8 @@ export interface ClaudeCodeAgentOptions {
 }
 
 export const AGENT_LABEL = 'botsman.agent';
+
+const execFileP = promisify(execFile);
 
 /**
  * Runs Claude Code headless in a DEDICATED throwaway container (§5 isolation):
@@ -70,7 +74,19 @@ export class ClaudeCodeAgent implements CodingAgent {
     ];
     if (this.opts.model) args.push('--model', this.opts.model);
 
-    logger.info('agent run start', { mode: input.mode, slug, image, maxTurns, timeoutMs });
+    // Claude Code refuses --dangerously-skip-permissions under root (its own
+    // safety check). Root-only VPS installs run the daemon as uid 0, so the
+    // agent gets the image's unprivileged user and ownership of the project.
+    const daemonUid = process.getuid?.() ?? 0;
+    const daemonGid = process.getgid?.() ?? 0;
+    const runUid = daemonUid === 0 ? 1000 : daemonUid;
+    const runGid = daemonGid === 0 ? 1000 : daemonGid;
+    if (daemonUid === 0) {
+      await execFileP('chown', ['-R', `${runUid}:${runGid}`, input.projectDir]).catch((e) =>
+        logger.warn('chown of project dir failed', { slug, error: (e as Error).message }));
+    }
+
+    logger.info('agent run start', { mode: input.mode, slug, image, maxTurns, timeoutMs, runUid });
 
     let container: Dockerode.Container | null = null;
     try {
@@ -80,7 +96,7 @@ export class ClaudeCodeAgent implements CodingAgent {
         Entrypoint: ['claude'],
         Cmd: args,
         WorkingDir: '/work',
-        User: `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
+        User: `${runUid}:${runGid}`,
         Env: [
           // Subscription token wins over the API key when both are set.
           ...(this.opts.oauthToken
