@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import type Dockerode from 'dockerode';
 import { paths } from './paths.js';
 import { logger } from './logger.js';
@@ -123,6 +124,7 @@ export class Orchestrator {
 
     try {
       await initProjectRepo(slug);
+      seedProjectMemory(slug, description);
       await this.pgAdmin.ensureProjectDb(project);
 
       report('generating');
@@ -306,6 +308,12 @@ export class Orchestrator {
       `Project slug: ${slug}. Public URL after deploy: https://${project.domain}/`,
       `Postgres is available; env vars at runtime: ${Object.keys(dbEnvFor(project)).join(', ')}.`,
     ];
+    // Layer-2 continuity: hand the agent its last completed change so it has
+    // immediate context even before reading CLAUDE.md (cheap, ~1 line).
+    const lastDone = this.store.tasksForProject(slug).find((t) => t.status === 'done' && t.summary);
+    if (lastDone?.summary) {
+      context.push(`Most recent completed change: ${lastDone.summary.slice(0, 500)}`);
+    }
     const run = await this.agent.run({ projectDir: dir, instruction, mode, context });
     let costUsd = run.costUsd ?? 0;
     if (!run.ok) return { ok: false, error: run.error, costUsd: costUsd || undefined };
@@ -335,6 +343,7 @@ export class Orchestrator {
         };
       }
     }
+    capProjectMemory(slug); // keep CLAUDE.md from growing unbounded (soft, never fails)
     return { ok: true, summary: run.summary, costUsd: costUsd || undefined };
   }
 
@@ -444,5 +453,60 @@ export class Orchestrator {
       `Clone: \`git clone ${cloneUrl}\``,
       'A `git push` redeploys the project automatically.',
     ].join('\n');
+  }
+}
+
+export const MEMORY_FILE = 'CLAUDE.md';
+const MEMORY_MAX_LINES = 300;
+const MEMORY_MAX_BYTES = 16 * 1024;
+
+/**
+ * Seed the project's memory file so it exists from the very first agent run
+ * (claude -p auto-loads /work/CLAUDE.md). The agent enriches/prunes it per the
+ * PROJECT MEMORY system-prompt section; commitAll persists it in git.
+ */
+function seedProjectMemory(slug: string, description: string): void {
+  const file = path.join(paths.projectDir(slug), MEMORY_FILE);
+  if (fs.existsSync(file)) return; // never clobber an existing memory
+  const body = [
+    `# ${slug}`,
+    '',
+    "Botsman project memory. Auto-loaded into the coding agent's context every run.",
+    'Keep it concise and current; never put secrets, credentials or connection strings here.',
+    '',
+    '## What this service is',
+    description.trim() || '(to be filled in)',
+    '',
+    '## Decisions & constraints',
+    '(none yet)',
+    '',
+    '## Conventions & preferences',
+    '(none yet)',
+    '',
+  ].join('\n');
+  try {
+    fs.writeFileSync(file, body);
+  } catch (e) {
+    logger.warn('failed to seed project memory', { slug, error: (e as Error).message });
+  }
+}
+
+/**
+ * Soft cap on memory size: if the agent let CLAUDE.md grow too large, truncate
+ * it (never fail the deploy — memory is not safety-critical and self-heals when
+ * the agent re-curates next run).
+ */
+function capProjectMemory(slug: string): void {
+  const file = path.join(paths.projectDir(slug), MEMORY_FILE);
+  try {
+    if (!fs.existsSync(file)) return;
+    const content = fs.readFileSync(file, 'utf8');
+    const lines = content.split('\n');
+    if (content.length <= MEMORY_MAX_BYTES && lines.length <= MEMORY_MAX_LINES) return;
+    const trimmed = lines.slice(0, MEMORY_MAX_LINES).join('\n').slice(0, MEMORY_MAX_BYTES);
+    fs.writeFileSync(file, trimmed + '\n\n<!-- truncated by botsman: keep CLAUDE.md concise -->\n');
+    logger.warn('project memory truncated', { slug, lines: lines.length, bytes: content.length });
+  } catch (e) {
+    logger.warn('failed to cap project memory', { slug, error: (e as Error).message });
   }
 }

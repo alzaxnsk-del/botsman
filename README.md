@@ -90,6 +90,7 @@ Full setup, including the DNS wildcard record, is in [docs/install.md](docs/inst
 | `/list` | All your projects with status and links |
 | `/status <project>` | Status, link, and the git clone URL |
 | `/logs <project>` | Recent logs from the service |
+| `/memory <project>` | What the agent remembers about the project (its `CLAUDE.md`) |
 | `/doctor <project>` | Diagnose problems (container, DNS, TLS) with one-tap fixes |
 | `/rollback <project>` | Roll back to the previous working version |
 | `/setup` | Change agent auth, domain or telemetry — right in the chat |
@@ -106,6 +107,10 @@ There are no modes to remember — just write what you want and Botsman routes i
 - **Operate the server** — "show the load", "clean up disk", "restart todo", "redeploy todo", "update the server" → server ops. Reads run immediately; anything that changes state asks for a one-tap confirmation, and host-level actions (OS update, Botsman self-update) ask twice.
 
 The persistent buttons below the message box are optional shortcuts: **🏠** resets the focus, **🛠 Server** shows what you can ask about the server, **📦 Projects** focuses a project so bare follow-ups ("make it bigger") land on it. Routing never depends on a mode — the same sentence means the same thing wherever you type it.
+
+### Project memory
+
+Each project keeps a `CLAUDE.md` at its root — the coding agent's durable memory across iterations. It's auto-loaded into the agent every run (create, edit, and questions), and the agent maintains it: what the service does, key decisions and *why*, conventions, your preferences, and "don't break X" notes. It's committed to git (so it travels with `git clone` and is restored on `/rollback`), kept concise, and scanned for secrets like any other file — only env-var **names** are ever recorded, never values. View it with `/memory <project>`; edit it by cloning the repo and pushing.
 
 ---
 
