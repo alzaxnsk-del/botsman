@@ -392,21 +392,24 @@ export class TelegramGateway {
 
   // --- soft-context routing ---
 
-  /** A keyboard button / NL switch. Sets the focused project (or clears it). */
+  /** Connect to a project (explicit, sticky context) or disconnect (🏠). */
   private async switchRoom(ctx: Context, room: Room): Promise<void> {
     const chatId = ctx.chat!.id;
     if (room.kind === 'project') {
       setFocus(this.store, chatId, room.slug);
       await ctx.reply(
-        `📦 Focused on *${room.slug}*. Change it ("add a dark theme"), ask about it ("how is this built?"), or just say what's new.`,
+        `🔗 *Connected to ${room.slug}.*\nEverything now goes here — changes ("add a dark theme") and questions ("how is this built?") — with no extra prompts, until you disconnect.\nTap 🏠 (below) to disconnect.`,
         { parse_mode: 'Markdown', reply_markup: roomKeyboard() },
       );
       return;
     }
+    const wasConnected = getFocus(this.store, chatId);
     clearFocus(this.store, chatId);
     const hint = room.kind === 'devops'
       ? 'Ask about the server in plain language: "show load", "clean up disk", "restart <project>", "update the server".'
-      : 'Tell me what to build or change, ask about the server, or open a project — all in plain language.';
+      : wasConnected
+        ? `🏠 Disconnected from ${wasConnected}. Messages route by content again — I'll ask if I'm unsure.`
+        : 'Tell me what to build or change, ask about the server, or connect to a project — all in plain language.';
     await ctx.reply(hint, { reply_markup: roomKeyboard() });
   }
 
@@ -417,8 +420,8 @@ export class TelegramGateway {
       return;
     }
     const kb = new InlineKeyboard();
-    for (const p of projects) kb.text(`📦 ${p.slug}`, `room:project:${p.slug}`).row();
-    await ctx.reply('Pick a project to focus on:', { reply_markup: kb });
+    for (const p of projects) kb.text(`🔗 ${p.slug}`, `room:project:${p.slug}`).row();
+    await ctx.reply('Connect to a project — then changes and questions go straight to it:', { reply_markup: kb });
   }
 
   /**
@@ -494,6 +497,20 @@ export class TelegramGateway {
       case 'create':
         return void this.createOrAsk(ctx, route.description, this.store.listProjects().map((p) => p.slug), thinkingId);
       case 'edit':
+        // Low confidence + not connected → confirm rather than edit a live
+        // project by guess (2026 consensus: don't guess, ask the user).
+        if (route.confidence === 'low') {
+          const kb = new InlineKeyboard()
+            .text(`✅ Change ${route.slug}`, `intent:edit:${route.slug}`)
+            .text('🆕 New project', 'intent:new');
+          await this.bot.api.editMessageText(
+            chatId, thinkingId,
+            `I think you want to change 📦 *${route.slug}*. Right? (or is this a new project?)`,
+            { parse_mode: 'Markdown', reply_markup: kb },
+          ).catch(() => {});
+          this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: route.instruction });
+          return;
+        }
         await this.deleteMessage(chatId, thinkingId);
         return void this.runTask('edit', route.slug, route.instruction, ctx);
       case 'question': {
