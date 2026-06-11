@@ -102,6 +102,11 @@ describe('routeMessage', () => {
     expect(r).toEqual({ kind: 'create', description: 'tamagotchi review', confidence: 'low' });
   });
 
+  it('routes a natural-language delete (confirmation handled by the gateway)', async () => {
+    const r = await routeMessage(stubLlm({ kind: 'delete', slug: 'tamagochi-review' }), 'удали тамагочи ревью', ['tamagochi-review'], null);
+    expect(r).toEqual({ kind: 'delete', slug: 'tamagochi-review' });
+  });
+
   it('returns none for an unknown op or kind', async () => {
     expect((await routeMessage(stubLlm({ kind: 'devops', op: 'rm_rf' }), 'x', [], null)).kind).toBe('none');
     expect((await routeMessage(stubLlm({ kind: 'whatever' }), 'x', [], null)).kind).toBe('none');

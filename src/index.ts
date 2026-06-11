@@ -7,6 +7,7 @@ import { logger } from './logger.js';
 import { paths } from './paths.js';
 import { configExists, loadConfig, missingSetup, ConfigError } from './config.js';
 import { OnboardingBot, READY_NOTIFY_KEY } from './gateway/onboarding.js';
+import { RESTART_NOTICE_KEY } from './types.js';
 import { Store } from './db.js';
 import { Telemetry } from './telemetry.js';
 import { ClaudeCodeAgent } from './agent/ClaudeCodeAgent.js';
@@ -177,6 +178,13 @@ async function main(): Promise<void> {
       'The buttons below are shortcuts: 🏠 reset · 🛠 server · 📦 focus a project.',
       true, // surface the persistent room keyboard on the first full-mode message
     );
+  }
+  // Confirm we're back after any self-restart (model/telemetry change, self-update),
+  // so a restart never looks like the bot died.
+  const backNotice = store.kvGet(RESTART_NOTICE_KEY);
+  if (backNotice) {
+    store.kvSet(RESTART_NOTICE_KEY, '');
+    await gateway.notifyOwner(backNotice, true);
   }
   logger.info('botsman started');
 

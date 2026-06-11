@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { detectIntent, looksLikeCreate, findSimilarProject } from '../src/intent.js';
+import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject } from '../src/intent.js';
+
+describe('looksLikeDelete (keeps delete out of the edit fast-path)', () => {
+  it('flags delete-phrased messages (EN + RU)', () => {
+    expect(looksLikeDelete('удали тамагочи ревью')).toBe(true);
+    expect(looksLikeDelete('удалить проект todo')).toBe(true);
+    expect(looksLikeDelete('снеси этот сервис')).toBe(true);
+    expect(looksLikeDelete('delete the shop project')).toBe(true);
+    expect(looksLikeDelete('remove todo')).toBe(true);
+  });
+  it('does not flag normal edits', () => {
+    expect(looksLikeDelete('add a dark theme')).toBe(false);
+    expect(looksLikeDelete('убери лишний отступ сверху')).toBe(false); // "убери" ≠ delete-project
+  });
+});
 
 describe('findSimilarProject (near-duplicate create guard)', () => {
   it('catches the reported case: «ревью тамагочи» ~ tamagotchi-web-app', () => {

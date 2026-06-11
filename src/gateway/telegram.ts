@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../logger.js';
 import { paths } from '../paths.js';
-import { detectIntent, looksLikeCreate, findSimilarProject } from '../intent.js';
+import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, type FixId } from '../doctor.js';
 import { updateConfigFile } from '../config.js';
@@ -22,7 +22,7 @@ import { MEMORY_FILE, type Orchestrator, type TaskOutcome } from '../orchestrato
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
 import type { DeployEngine } from '../deploy/engine.js';
-import type { Stage } from '../types.js';
+import { RESTART_NOTICE_KEY, type Stage } from '../types.js';
 
 const STAGE_LABELS: Record<Stage, string> = {
   accepted: '📥 Got it, working…',
@@ -255,6 +255,7 @@ export class TelegramGateway {
         const cfg = updateConfigFile({});
         updateConfigFile({ agent: { ...cfg.agent, model: id } });
         await ctx.reply(`Switching to ${modelLabel(id)} — restarting to apply (~10s)…`);
+        this.store.kvSet(RESTART_NOTICE_KEY, `✓ Back online — now using ${modelLabel(id)}.`);
         logger.info('setup model change, restarting', { model: id });
         setTimeout(() => process.exit(0), 1500);
         return;
@@ -274,6 +275,7 @@ export class TelegramGateway {
           const enabled = !cfg.telemetry.enabled;
           updateConfigFile({ telemetry: { ...cfg.telemetry, enabled } });
           await ctx.reply(`Telemetry will be ${enabled ? 'ON' : 'OFF'} — restarting to apply (~10s)…`);
+          this.store.kvSet(RESTART_NOTICE_KEY, `✓ Back online — telemetry ${enabled ? 'ON' : 'OFF'}.`);
         } else {
           return;
         }
@@ -450,10 +452,10 @@ export class TelegramGateway {
     if (!looksOperational(text) && !looksLikeQuestion(text)) {
       const intent = detectIntent(text, slugs, focused);
       if (intent.kind === 'create') return void this.createOrAsk(ctx, intent.description, slugs, null);
-      if (intent.kind === 'edit' && !looksLikeCreate(text)) {
+      if (intent.kind === 'edit' && !looksLikeCreate(text) && !looksLikeDelete(text)) {
         return void this.runTask('edit', intent.slug, intent.instruction, ctx);
       }
-      // ambiguous or create-phrased → fall through to the LLM tail
+      // ambiguous, create- or delete-phrased → fall through to the LLM tail
     }
 
     if (!this.structuredLlm) return this.fallbackNoLlm(ctx, text, focused);
@@ -517,6 +519,16 @@ export class TelegramGateway {
         await this.bot.api.editMessageText(chatId, thinkingId, '🤔 Looking into it…').catch(() => {});
         const res = await this.orchestrator.askProject(route.slug, route.question);
         return void this.editMdSafe(chatId, thinkingId, res.answer || 'No answer.');
+      }
+      case 'delete': {
+        // Natural-language delete → the same confirm-by-"yes" flow as /delete.
+        this.pendingDelete.set(chatId, route.slug);
+        await this.bot.api.editMessageText(
+          chatId, thinkingId,
+          `⚠️ Delete project *${route.slug}* together with its database and code? This cannot be undone.\n\nReply "yes" to confirm; anything else cancels.`,
+          { parse_mode: 'Markdown' },
+        ).catch(() => {});
+        return;
       }
       case 'devops': {
         const op = route.op;

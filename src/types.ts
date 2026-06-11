@@ -1,5 +1,9 @@
 /** Shared types across Botsman components. */
 
+/** kv key: a message to post to the owner on the next full-mode startup, so a
+ *  self-restart (model/telemetry change, self-update) confirms it's back. */
+export const RESTART_NOTICE_KEY = 'restart_notice';
+
 export type ProjectStatus =
   | 'creating'
   | 'building'

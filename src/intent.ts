@@ -62,6 +62,14 @@ export function looksLikeCreate(text: string): boolean {
   return CREATE_VERBS.test(text.trim().toLowerCase());
 }
 
+// No \b (Cyrillic). Keep delete-phrased messages out of the edit fast-path so
+// they reach the LLM router, which maps them to a delete-with-confirmation.
+const DELETE_VERBS = /(^|\s)(удали[а-яё]*|снес[а-яё]*|delete|remove|drop)(\s|$)/i;
+
+export function looksLikeDelete(text: string): boolean {
+  return DELETE_VERBS.test(text.trim().toLowerCase());
+}
+
 const NOISE_TOKENS = new Set(['web', 'app', 'application', 'service', 'api', 'site', 'bot', 'server', 'review', 'app2']);
 
 /**
