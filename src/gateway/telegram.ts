@@ -591,9 +591,12 @@ export class TelegramGateway {
   ): Promise<void> {
     const chatId = ctx.chat!.id;
     const queued = this.orchestrator.queueLength > 0 ? ' (queued behind the current task)' : '';
-    // Carry the persistent room keyboard so the shortcut buttons appear from the
-    // very first action, even for a user who never sent /start (post-onboarding).
-    const statusMsg = await ctx.reply(`${STAGE_LABELS.accepted}${queued}`, { reply_markup: roomKeyboard() });
+    // IMPORTANT: no reply_markup here. This message is edited live through the
+    // task stages, and Telegram cannot editMessageText a message that carries a
+    // ReplyKeyboardMarkup — attaching the room keyboard here froze the status at
+    // "Got it, working…". The keyboard is surfaced by /start, /list, the ready
+    // message and room switches instead.
+    const statusMsg = await ctx.reply(`${STAGE_LABELS.accepted}${queued}`);
 
     let lastText = STAGE_LABELS.accepted;
     let dots = 0;
