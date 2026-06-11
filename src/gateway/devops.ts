@@ -145,7 +145,11 @@ Actions:
     project_list, restart_service (slug), redeploy_service (slug), rollback_service (slug),
     restart_proxy, prune_docker (reclaim disk), self_update (update Botsman), host_update (apt upgrade).
 
-Rules: pick the single best action. Copy a referenced project slug exactly from the list; if the user clearly means the focused project but doesn't name it, use it; otherwise use "". If nothing fits, reply {"kind":"none"}.`;
+Rules:
+- Pick the single best action. Copy a referenced project slug EXACTLY from the list.
+- A message about fixing, reviewing, improving, or reporting a problem ("it's broken", "crashes", "white screen", "works poorly") with an EXISTING service is an EDIT (or question) of THAT service — NOT a new project. Choose "create" ONLY for a clearly new, different service.
+- Project references may be fuzzy or transliterated — e.g. «тамагочи» / "tamagochi" refers to an existing "tamagotchi-web-app". Match the message to the closest existing project before considering create.
+- If the user clearly means the focused project but doesn't name it, use it; otherwise use "". If nothing fits, reply {"kind":"none"}.`;
 
 interface RouterReply { kind: string; op?: string; slug?: string }
 
