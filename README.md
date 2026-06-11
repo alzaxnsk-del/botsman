@@ -106,7 +106,9 @@ There are no modes to remember — just write what you want and Botsman routes i
 - **Ask** — "how is this built?", "what's in the logs?" → answered without deploying.
 - **Operate the server** — "show the load", "clean up disk", "restart todo", "redeploy todo", "update the server" → server ops. Reads run immediately; anything that changes state asks for a one-tap confirmation, and host-level actions (OS update, Botsman self-update) ask twice.
 
-The persistent buttons below the message box are optional shortcuts: **🏠** resets the focus, **🛠 Server** shows what you can ask about the server, **📦 Projects** focuses a project so bare follow-ups ("make it bigger") land on it. Routing never depends on a mode — the same sentence means the same thing wherever you type it.
+Botsman never silently guesses when it's unsure. If a message could be a new project or a change to an existing one — or it's unclear which project — it **asks with buttons** ("Change 📦 todo? · 🆕 New project") instead of acting. Before building something whose name resembles an existing project, it checks with you first.
+
+For focused work, **connect to a project**: tap it under 📦 Projects (or say "go to todo"). While connected, every change and question goes straight to it with no prompts — tap **🏠** to disconnect. Not connected? Routing is by content, and anything ambiguous is confirmed first.
 
 ### Project memory
 
