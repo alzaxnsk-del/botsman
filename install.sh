@@ -53,6 +53,12 @@ REAL_HOME="$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)"
 BOTSMAN_HOME="${REAL_HOME}/.botsman"
 mkdir -p "$BOTSMAN_HOME"
 chmod 700 "$BOTSMAN_HOME"
+if [ -z "${SUDO_USER:-}" ]; then
+  log "Installing as root — fully supported: the daemon runs as root, while coding"
+  log "agents and deployed services always run as unprivileged users. State: $BOTSMAN_HOME"
+else
+  log "Installing for user ${SUDO_USER}. State: $BOTSMAN_HOME"
+fi
 
 if [ ! -f .env ]; then
   log "Generating .env (Postgres password, owner UID, docker socket GID)..."

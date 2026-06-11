@@ -60,6 +60,12 @@ The script, in one pass:
 
 Then message your bot `/start` and describe your first service.
 
+> **Root or sudo?** Both are supported. On a fresh VPS where you log in as
+> root, just run the command as is — the daemon will run as root, but the
+> coding agent and all deployed services always run as unprivileged users in
+> isolated containers. With a sudo user, state lives in that user's
+> `~/.botsman` and `git push` deploys work over that user's SSH.
+
 ## Where things live
 
 | Path | What |

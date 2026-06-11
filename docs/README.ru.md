@@ -36,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.s
 3. Запускает интерактивный мастер: токен бота → твой Telegram ID → ключ Anthropic → базовый домен → согласие на телеметрию (по умолчанию **выключена**). Токены проверяются живыми запросами; с невалидным ключом мастер завершается понятной ошибкой, а не трейсбэком.
 4. Поднимает `docker compose`: демон + Caddy (автоматический Let's Encrypt) + Postgres.
 
-Конфиг сохраняется в `~/.botsman/config.json` с правами `600`. Перезапустить мастер: `cd /opt/botsman && docker compose run --rm --no-deps botsman setup && docker compose up -d`.
+Ставить можно как от root (типичный свежий VPS), так и через sudo-пользователя — оба пути поддерживаются: демон может работать от root, но кодящий агент и все задеплоенные сервисы всегда выполняются от непривилегированных пользователей в своих контейнерах. Конфиг сохраняется в `~/.botsman/config.json` с правами `600`. Перезапустить мастер: `cd /opt/botsman && docker compose run --rm --no-deps botsman setup && docker compose up -d`.
 
 ## Использование
 

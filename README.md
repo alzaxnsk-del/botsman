@@ -78,6 +78,8 @@ curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.s
 
 The installer sets up Docker (if needed), starts the Botsman daemon and reverse proxy, and walks you through a short setup wizard (bot token, your Telegram ID, subscription token or API key, base domain). Once it's running, message your bot `/start`.
 
+Installing **as root is fine** (the typical fresh VPS): the daemon runs as root, while the coding agent and every deployed service always run as unprivileged users in their own containers.
+
 Full setup, including the DNS wildcard record, is in [docs/install.md](docs/install.md). Полная операционная документация на русском — [docs/README.ru.md](docs/README.ru.md).
 
 ---
