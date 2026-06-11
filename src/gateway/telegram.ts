@@ -503,7 +503,9 @@ export class TelegramGateway {
   ): Promise<void> {
     const chatId = ctx.chat!.id;
     const queued = this.orchestrator.queueLength > 0 ? ' (queued behind the current task)' : '';
-    const statusMsg = await ctx.reply(`${STAGE_LABELS.accepted}${queued}`);
+    // Carry the persistent room keyboard so the shortcut buttons appear from the
+    // very first action, even for a user who never sent /start (post-onboarding).
+    const statusMsg = await ctx.reply(`${STAGE_LABELS.accepted}${queued}`, { reply_markup: roomKeyboard() });
 
     let lastText = STAGE_LABELS.accepted;
     let dots = 0;
@@ -634,10 +636,13 @@ export class TelegramGateway {
     return isValidSlug(arg) ? arg : null;
   }
 
-  /** Notify the owner out-of-band (push-to-deploy results). */
-  async notifyOwner(text: string): Promise<void> {
+  /** Notify the owner out-of-band (push-to-deploy results, the post-onboarding
+   *  "ready" message). `withKeyboard` surfaces the persistent room shortcuts —
+   *  used on the first full-mode message so the buttons appear without /start. */
+  async notifyOwner(text: string, withKeyboard = false): Promise<void> {
+    const opts = withKeyboard ? { reply_markup: roomKeyboard() } : {};
     for (const id of this.ownerIds) {
-      await this.bot.api.sendMessage(id, text).catch(() => {});
+      await this.bot.api.sendMessage(id, text, opts).catch(() => {});
     }
   }
 

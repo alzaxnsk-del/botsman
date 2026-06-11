@@ -171,7 +171,9 @@ async function main(): Promise<void> {
     store.kvSet(READY_NOTIFY_KEY, '');
     await gateway.notifyOwner(
       '🚀 Ready! Describe your first service, for example:\n' +
-      '"make a TODO service with a task list and the ability to mark tasks done"',
+      '"make a TODO service with a task list and the ability to mark tasks done"\n\n' +
+      'The buttons below are shortcuts: 🏠 reset · 🛠 server · 📦 focus a project.',
+      true, // surface the persistent room keyboard on the first full-mode message
     );
   }
   logger.info('botsman started');
