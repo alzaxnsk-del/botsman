@@ -81,6 +81,9 @@ export async function ensureBareRepo(slug: string, controlUrl: string, token: st
     hook,
     `#!/bin/sh
 # Installed by botsman: notify the daemon that ${slug} received a push.
+# The daemon's own bare-repo syncs set BOTSMAN_INTERNAL_PUSH — without this
+# guard every agent deploy would echo a phantom push-to-deploy of itself.
+[ -n "$BOTSMAN_INTERNAL_PUSH" ] && exit 0
 curl -fsS -m 10 -X POST -H "X-Botsman-Token: ${token}" "${controlUrl}/hooks/push/${slug}" || \
   echo "botsman daemon unreachable at ${controlUrl}; deploy will not start" >&2
 `,
@@ -127,7 +130,13 @@ export async function syncToBare(slug: string): Promise<void> {
   const dir = paths.projectDir(slug);
   const bare = paths.bareRepo(slug);
   if (!fs.existsSync(bare)) return;
-  await git(dir, 'push', '--force', bare, 'main');
+  // BOTSMAN_INTERNAL_PUSH: the post-receive hook must NOT treat our own sync
+  // as a user push (it would echo a redeploy of the commit just deployed).
+  await execFileP('git', [...GIT_AUTHOR, 'push', '--force', bare, 'main'], {
+    cwd: dir,
+    maxBuffer: 10 * 1024 * 1024,
+    env: { ...process.env, BOTSMAN_INTERNAL_PUSH: '1' },
+  });
 }
 
 /** Pull pushed changes from the bare repo into the working tree (post-receive flow). */
