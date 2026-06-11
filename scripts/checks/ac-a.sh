@@ -38,6 +38,7 @@ done
 systemctl is-enabled docker >/dev/null 2>&1 && pass "docker enabled at boot" || fail "docker not enabled at boot"
 
 echo "AC-A3 (manual): run 'docker compose run --rm --no-deps botsman setup' with an"
-echo "  invalid Anthropic key — expect a clear error and exit code 1, no traceback."
+echo "  invalid bot token — expect a clear error and exit code 1, no traceback."
+echo "  (agent tokens are validated in the Telegram chat with a clear retry message)"
 
 finish

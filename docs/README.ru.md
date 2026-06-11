@@ -53,6 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.s
 | `/doctor <slug>` | диагностика (контейнер, DNS, TLS) с кнопками-фиксами прямо в чате |
 | `/rollback <slug>` | откат на предыдущую рабочую версию |
 | `/delete <slug>` | удаление (с подтверждением вторым сообщением) |
+| `/setup` | смена авторизации агента, домена или телеметрии — прямо в чате |
 
 Бот обслуживает **только** whitelisted Telegram ID из конфига; остальным — отказ без какой-либо информации.
 
@@ -76,7 +77,7 @@ git push   # автоматически передеплоит; результа
 | `ownerIds` | да | массив Telegram user ID владельца |
 | `anthropicApiKey` | одно из двух | API-ключ Anthropic (оплата за использование) |
 | `claudeCodeOauthToken` | одно из двух | токен подписки Claude из `claude setup-token` (`sk-ant-oat…`); при обоих заданных приоритет у него |
-| `baseDomain` | да | базовый домен, например `apps.example.com` |
+| `baseDomain` | задаётся в чате | базовый домен, например `apps.example.com`; запрашивается ботом при онбординге |
 | `telemetry.enabled` | нет | анонимная телеметрия, **по умолчанию `false`** |
 | `telemetry.endpoint` | нет | куда слать события; **без него события никуда не отправляются**, даже при `enabled: true` |
 | `agent.maxTurns` | нет | лимит итераций агента на задачу (по умолчанию 60) |

@@ -60,13 +60,15 @@ export async function preflight(
     warnings.push('Caddy Admin API is unreachable — deploys cannot publish routes until Caddy is up.');
   }
 
-  const probe = `botsman-dns-probe.${config.baseDomain}`;
-  try {
-    await dns.lookup(probe);
-  } catch {
-    warnings.push(
-      `DNS: ${probe} does not resolve. A wildcard record *.${config.baseDomain} → this server's IP is required, otherwise links and TLS will not work.`,
-    );
+  if (config.baseDomain) {
+    const probe = `botsman-dns-probe.${config.baseDomain}`;
+    try {
+      await dns.lookup(probe);
+    } catch {
+      warnings.push(
+        `DNS: ${probe} does not resolve. A wildcard record *.${config.baseDomain} → this server's IP is required, otherwise links and TLS will not work.`,
+      );
+    }
   }
 
   for (const w of warnings) logger.warn(`preflight: ${w}`);

@@ -4,6 +4,7 @@ import { logger } from '../logger.js';
 import { detectIntent } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, type FixId } from '../doctor.js';
+import { updateConfigFile } from '../config.js';
 import type { Orchestrator, TaskOutcome } from '../orchestrator.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
@@ -79,6 +80,7 @@ export class TelegramGateway {
           '/doctor <slug> — diagnose problems, with one-tap fixes',
           '/rollback <slug> — roll back to the previous version',
           '/delete <slug> — delete a project',
+          '/setup — change agent auth, domain or telemetry',
         ].join('\n'),
       ),
     );
@@ -135,6 +137,19 @@ export class TelegramGateway {
       );
     });
 
+    // Re-configuration without a console: clearing a config piece and
+    // restarting drops the daemon into in-chat onboarding for that piece.
+    this.bot.command('setup', async (ctx) => {
+      const kb = new InlineKeyboard()
+        .text('🔑 Coding agent auth', 'setup:auth')
+        .text('🌐 Domain', 'setup:domain')
+        .row()
+        .text('📊 Toggle telemetry', 'setup:telemetry');
+      await ctx.reply('What do you want to change? I will restart and ask for the new value here.', {
+        reply_markup: kb,
+      });
+    });
+
     // In-chat diagnostics with one-tap fixes (no console needed).
     this.bot.command('doctor', async (ctx) => {
       const slug = this.argSlug(ctx);
@@ -149,6 +164,28 @@ export class TelegramGateway {
       const data = ctx.callbackQuery.data;
       const chatId = ctx.chat?.id;
       if (!chatId) return void ctx.answerCallbackQuery();
+
+      if (data.startsWith('setup:')) {
+        await ctx.answerCallbackQuery();
+        const what = data.slice('setup:'.length);
+        if (what === 'auth') {
+          updateConfigFile({ anthropicApiKey: undefined, claudeCodeOauthToken: undefined });
+          await ctx.reply('Restarting into setup — I will ask for the new agent auth here in ~10s…');
+        } else if (what === 'domain') {
+          updateConfigFile({ baseDomain: undefined });
+          await ctx.reply('Restarting into setup — I will ask for the new domain here in ~10s…\n(existing projects keep their current addresses)');
+        } else if (what === 'telemetry') {
+          const cfg = updateConfigFile({});
+          const enabled = !cfg.telemetry.enabled;
+          updateConfigFile({ telemetry: { ...cfg.telemetry, enabled } });
+          await ctx.reply(`Telemetry will be ${enabled ? 'ON' : 'OFF'} — restarting to apply (~10s)…`);
+        } else {
+          return;
+        }
+        logger.info('setup change requested, restarting', { what });
+        setTimeout(() => process.exit(0), 1500);
+        return;
+      }
 
       if (data.startsWith('fix:')) {
         const [, action, slug] = data.split(':');
