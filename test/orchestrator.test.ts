@@ -100,6 +100,31 @@ describe('Orchestrator pipeline', () => {
     expect(stages).toContain('generating');
     expect(fs.existsSync(paths.bareRepo(o.slug))).toBe(true);
     expect(store.tasksForProject(o.slug)[0].status).toBe('done');
+
+    // Project memory is seeded by the orchestrator (the fakeAgent never touches
+    // CLAUDE.md), containing the original description.
+    const memory = fs.readFileSync(path.join(paths.projectDir(o.slug), 'CLAUDE.md'), 'utf8');
+    expect(memory).toContain('сделай todo сервис');
+    expect(memory).toContain('Botsman project memory');
+  });
+
+  it('edit: hands the agent its most recent completed change (Layer-2 continuity)', async () => {
+    const seenContext: string[][] = [];
+    const agent: CodingAgent = {
+      run: async (input) => {
+        seenContext.push(input.context ?? []);
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), `// ${input.instruction}`);
+        return { ok: true, summary: `did: ${input.instruction}`, durationMs: 1 };
+      },
+    };
+    const orch = makeOrch(agent, fakeEngine());
+    const created = await orch.enqueue('create', 'сделай заметки', () => {});
+    await orch.enqueue('edit', 'добавь тёмную тему', () => {}, created.slug);
+
+    // The create run had no prior task → no continuity line.
+    expect(seenContext[0].some((l) => l.includes('Most recent completed change'))).toBe(false);
+    // The edit run sees the create's summary.
+    expect(seenContext[1].some((l) => l.includes('Most recent completed change: did: сделай заметки'))).toBe(true);
   });
 
   it('create: persistent hardcoded secret blocks deploy (AC-B5)', async () => {

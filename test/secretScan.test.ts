@@ -31,6 +31,13 @@ describe('scanForSecrets (AC-B5)', () => {
     expect(patterns).toContain('Hardcoded password in URL');
   });
 
+  it('covers the project memory file CLAUDE.md', () => {
+    // Memory is committed to git, so the secret scan must walk it too.
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# notes\nthe key is sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA');
+    const findings = scanForSecrets(dir);
+    expect(findings.some((f) => f.file === 'CLAUDE.md')).toBe(true);
+  });
+
   it('ignores clean env-based code', () => {
     fs.writeFileSync(
       path.join(dir, 'app.js'),
