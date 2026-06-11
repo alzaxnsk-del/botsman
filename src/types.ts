@@ -4,6 +4,10 @@
  *  self-restart (model/telemetry change, self-update) confirms it's back. */
 export const RESTART_NOTICE_KEY = 'restart_notice';
 
+/** kv key: JSON backup of config fields a /setup change cleared, so the user
+ *  can /cancel an in-chat re-config and keep their previous settings. */
+export const SETUP_BACKUP_KEY = 'setup_backup';
+
 export type ProjectStatus =
   | 'creating'
   | 'building'
