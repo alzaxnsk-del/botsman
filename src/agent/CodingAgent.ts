@@ -6,9 +6,10 @@
 export interface AgentRunInput {
   /** Absolute path to the project working directory. The agent must not touch anything outside it. */
   projectDir: string;
-  /** The user's instruction, verbatim. */
+  /** The user's instruction or question, verbatim. */
   instruction: string;
-  mode: 'create' | 'edit';
+  /** create/edit write files; 'ask' is read-only (the orchestrator never commits it). */
+  mode: 'create' | 'edit' | 'ask';
   /** Extra context lines (stack contract, port, db env vars, etc.). */
   context?: string[];
 }
