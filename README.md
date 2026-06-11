@@ -91,6 +91,7 @@ Full setup, including the DNS wildcard record, is in [docs/install.md](docs/inst
 | `/list` | All your projects with status and links |
 | `/status <project>` | Status, link, and the git clone URL |
 | `/logs <project>` | Recent logs from the service |
+| `/doctor <project>` | Diagnose problems (container, DNS, TLS) with one-tap fixes |
 | `/rollback <project>` | Roll back to the previous working version |
 | `/delete <project>` | Stop and remove a project (asks for confirmation) |
 

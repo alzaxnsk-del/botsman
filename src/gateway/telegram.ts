@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { logger } from '../logger.js';
 import { detectIntent } from '../intent.js';
 import { isValidSlug } from '../slug.js';
+import { runDoctor, type FixId } from '../doctor.js';
 import type { Orchestrator, TaskOutcome } from '../orchestrator.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
@@ -75,6 +76,7 @@ export class TelegramGateway {
           '/list — all projects',
           '/status <slug> — status and git access',
           '/logs <slug> — container logs',
+          '/doctor <slug> — diagnose problems, with one-tap fixes',
           '/rollback <slug> — roll back to the previous version',
           '/delete <slug> — delete a project',
         ].join('\n'),
@@ -133,12 +135,40 @@ export class TelegramGateway {
       );
     });
 
-    // Disambiguation buttons for free text.
+    // In-chat diagnostics with one-tap fixes (no console needed).
+    this.bot.command('doctor', async (ctx) => {
+      const slug = this.argSlug(ctx);
+      if (!slug) return void ctx.reply('Usage: /doctor <slug>');
+      if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
+      const msg = await ctx.reply(`🩺 Checking ${slug}…`);
+      await this.editDoctorReport(ctx.chat!.id, msg.message_id, slug);
+    });
+
+    // Buttons: intent disambiguation + doctor fixes.
     this.bot.on('callback_query:data', async (ctx) => {
       const data = ctx.callbackQuery.data;
       const chatId = ctx.chat?.id;
+      if (!chatId) return void ctx.answerCallbackQuery();
+
+      if (data.startsWith('fix:')) {
+        const [, action, slug] = data.split(':');
+        if (!slug || !this.store.projectExists(slug)) {
+          return void ctx.answerCallbackQuery({ text: 'Project no longer exists.' });
+        }
+        await ctx.answerCallbackQuery({ text: 'Working…' });
+        const msgId = ctx.callbackQuery.message?.message_id;
+        if (action === 'proxy') {
+          await this.deployEngine.restartProxy().catch(() => {});
+          await sleep(15_000); // give Caddy time to come up and re-attempt issuance
+        } else if (action === 'app') {
+          await this.deployEngine.restartService(slug).catch(() => {});
+          await sleep(8_000);
+        }
+        if (msgId) await this.editDoctorReport(chatId, msgId, slug);
+        return;
+      }
+
       await ctx.answerCallbackQuery();
-      if (!chatId) return;
       const pending = this.pendingAmbiguous.get(chatId);
       // A click on an outdated question must not apply the latest text.
       if (!pending || pending.messageId !== ctx.callbackQuery.message?.message_id) {
@@ -254,18 +284,46 @@ export class TelegramGateway {
     if (o.warning) lines.push('', `⚠️ ${o.warning}`);
     if (o.costUsd && o.costUsd > 0) lines.push('', `💸 Tokens: ≈$${o.costUsd.toFixed(2)}`);
     lines.push('', 'What should I change?');
+    // Public-URL warning comes with one-tap fixes (retry TLS / re-check).
+    const fixKb = o.warning ? this.doctorKeyboard(o.slug, ['proxy', 'recheck']) : undefined;
     await this.bot.api.editMessageText(chatId, statusMsgId, lines.join('\n'), {
       parse_mode: 'Markdown',
       link_preview_options: { is_disabled: true },
+      reply_markup: fixKb,
     }).catch(async () => {
       // Markdown in agent summaries can be malformed — retry as plain text.
-      await this.bot.api.editMessageText(chatId, statusMsgId, lines.join('\n')).catch(() => {});
+      await this.bot.api.editMessageText(chatId, statusMsgId, lines.join('\n'), {
+        reply_markup: fixKb,
+      }).catch(() => {});
     });
     if (o.screenshotPath && fs.existsSync(o.screenshotPath)) {
       await ctx.replyWithPhoto(new InputFile(o.screenshotPath)).catch((e) =>
         logger.warn('screenshot send failed', { error: String(e) }),
       );
     }
+  }
+
+  /** Run diagnostics and render the report with one-tap fix buttons. */
+  private async editDoctorReport(chatId: number, messageId: number, slug: string): Promise<void> {
+    const report = await runDoctor(slug, this.store, this.deployEngine).catch(() => null);
+    if (!report) {
+      await this.bot.api.editMessageText(chatId, messageId, `Could not diagnose ${slug}.`).catch(() => {});
+      return;
+    }
+    const text = `🩺 ${slug}\n\n${report.lines.join('\n')}${report.healthy ? '\n\nAll good!' : ''}`;
+    await this.bot.api.editMessageText(chatId, messageId, text, {
+      reply_markup: this.doctorKeyboard(slug, report.fixes),
+      link_preview_options: { is_disabled: true },
+    }).catch(() => {});
+  }
+
+  private doctorKeyboard(slug: string, fixes: FixId[]): InlineKeyboard | undefined {
+    if (!fixes.length) return undefined;
+    const kb = new InlineKeyboard();
+    if (fixes.includes('proxy')) kb.text('🔁 Reissue TLS (restart proxy)', `fix:proxy:${slug}`);
+    if (fixes.includes('app')) kb.text('▶️ Restart service', `fix:app:${slug}`);
+    if (fixes.includes('recheck')) kb.row().text('🔄 Re-check', `fix:recheck:${slug}`);
+    return kb;
   }
 
   /** Markdown with arbitrary content (logs, commit subjects) may not parse — fall back to plain. */
@@ -299,6 +357,10 @@ export class TelegramGateway {
   async stop(): Promise<void> {
     await this.bot.stop();
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function statusEmoji(status: string): string {
