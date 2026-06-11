@@ -55,6 +55,9 @@ function fakeEngine(overrides: Partial<DeployEngine> = {}): DeployEngine & { dep
     containerLogs: async () => '',
     containerRunning: async () => true,
     cleanupImages: async () => {},
+    probeInternal: async () => ({ ok: true, detail: 'HTTP 200' }),
+    restartService: async () => {},
+    restartProxy: async () => {},
     ...overrides,
   };
 }

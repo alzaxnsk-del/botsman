@@ -50,6 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.s
 | `/list` | все проекты со статусами и ссылками |
 | `/status <slug>` | статус, история коммитов, git-URL для клонирования |
 | `/logs <slug>` | последние строки логов контейнера |
+| `/doctor <slug>` | диагностика (контейнер, DNS, TLS) с кнопками-фиксами прямо в чате |
 | `/rollback <slug>` | откат на предыдущую рабочую версию |
 | `/delete <slug>` | удаление (с подтверждением вторым сообщением) |
 
