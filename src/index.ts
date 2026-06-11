@@ -10,6 +10,7 @@ import { OnboardingBot, READY_NOTIFY_KEY } from './gateway/onboarding.js';
 import { Store } from './db.js';
 import { Telemetry } from './telemetry.js';
 import { ClaudeCodeAgent } from './agent/ClaudeCodeAgent.js';
+import { DEFAULT_MODEL } from './agent/models.js';
 import { CaddyClient } from './deploy/caddy.js';
 import { DockerDeployEngine, SERVICE_PORT } from './deploy/engine.js';
 import { PostgresAdmin, dbEnvFor } from './deploy/postgres.js';
@@ -114,7 +115,8 @@ async function main(): Promise<void> {
     hostProjectsDir,
     maxTurns: config.agent?.maxTurns,
     timeoutMs: config.agent?.timeoutMs,
-    model: config.agent?.model,
+    // Quality matters most for chat-to-deploy → Opus unless the owner picked otherwise.
+    model: config.agent?.model ?? DEFAULT_MODEL,
     port: SERVICE_PORT,
     // Placeholder var names for the system prompt; real values are injected per-project.
     dbEnv: dbEnvFor({ dbName: 'app_<slug>', dbUser: 'u_<slug>', dbPassword: '<runtime>' }),

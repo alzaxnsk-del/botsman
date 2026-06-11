@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { validateConfig, missingSetup, ConfigError } from '../src/config.js';
+import { describe, it, expect, afterEach } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { validateConfig, missingSetup, saveConfig, loadConfig, updateConfigFile, ConfigError } from '../src/config.js';
 
 const valid = {
   telegramBotToken: '123456789:AAFakeTokenForTestsOnly_1234567890abc',
@@ -7,6 +10,24 @@ const valid = {
   anthropicApiKey: 'sk-ant-test-key-for-validation-only',
   baseDomain: 'apps.example.com',
 };
+
+describe('updateConfigFile agent.model merge', () => {
+  afterEach(() => { delete process.env.BOTSMAN_HOME; });
+
+  it('sets agent.model without dropping other agent fields (the /setup + onboarding pattern)', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'botsman-cfg-'));
+    process.env.BOTSMAN_HOME = home;
+    try {
+      saveConfig(validateConfig({ ...valid, agent: { maxTurns: 42 } }));
+      const cfg = loadConfig();
+      const updated = updateConfigFile({ agent: { ...cfg.agent, model: 'opus' } });
+      expect(updated.agent?.model).toBe('opus');
+      expect(updated.agent?.maxTurns).toBe(42); // preserved
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('validateConfig', () => {
   it('accepts a valid config and defaults telemetry to OFF', () => {
