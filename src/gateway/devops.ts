@@ -5,6 +5,7 @@ import type { DeployEngine } from '../deploy/engine.js';
 import type { Orchestrator } from '../orchestrator.js';
 import type { HostExec } from '../hostExec.js';
 import { runDoctor } from '../doctor.js';
+import { RESTART_NOTICE_KEY } from '../types.js';
 
 /**
  * DevOps room: free text → a FIXED catalog of operations. The LLM only picks an
@@ -131,6 +132,7 @@ export type Route =
   | { kind: 'create'; description: string; confidence?: 'low' }
   | { kind: 'edit'; slug: string; instruction: string; confidence?: 'low' }
   | { kind: 'question'; slug: string; question: string; confidence?: 'low' }
+  | { kind: 'delete'; slug: string }
   | { kind: 'devops'; op: DevOpsOp }
   | { kind: 'none' };
 
@@ -140,6 +142,7 @@ Actions:
 - {"kind":"create"} — the user wants a NEW service built from a description.
 - {"kind":"edit","slug":"<project>"} — CHANGE an existing service (add/fix/remove a feature, restyle, change behavior).
 - {"kind":"question","slug":"<project>"} — ASK about an existing service (how it works, its status, what's in the logs) WITHOUT changing it.
+- {"kind":"delete","slug":"<project>"} — the user wants to DELETE/remove an existing service ("удали X", "delete X", "remove the X project"). The system will ask for confirmation.
 - {"kind":"devops","op":"<id>","slug":"<project-or-empty>"} — a SERVER/operations action. op is one of:
     host_metrics (server load/mem/disk), container_stats, service_logs (slug), service_doctor (slug),
     project_list, restart_service (slug), redeploy_service (slug), rollback_service (slug),
@@ -207,6 +210,10 @@ export async function routeMessage(
     case 'question': {
       const slug = resolveSlug(reply.slug);
       return slug ? { kind: 'question', slug, question: text, confidence: conf(slug) } : { kind: 'none' };
+    }
+    case 'delete': {
+      const slug = resolveSlug(reply.slug);
+      return slug ? { kind: 'delete', slug } : { kind: 'none' };
     }
     case 'devops': {
       const op = reply.op as DevOpsOpId;
@@ -301,8 +308,9 @@ export async function runMutatingOp(op: DevOpsOp, deps: DevOpsDeps): Promise<str
     }
     case 'self_update': {
       const r = await deps.hostExec.selfUpdate(deps.hostRepoDir);
+      if (r.ok) deps.store.kvSet(RESTART_NOTICE_KEY, '✓ Botsman updated and back online.');
       return r.ok
-        ? '✓ Update started — rebuilding and restarting. I will be back in ~30s.'
+        ? '✓ Update started — rebuilding and restarting. I will be back in ~1–2 min.'
         : `✗ Self-update failed: ${r.output.slice(0, 500)}`;
     }
     case 'host_update': {
