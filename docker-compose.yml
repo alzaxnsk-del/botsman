@@ -33,6 +33,8 @@ services:
       # Host-side path of the state dir — needed to bind-mount project dirs
       # into agent containers and shown in /status as the git clone URL.
       BOTSMAN_HOST_DIR: ${BOTSMAN_HOME:-~/.botsman}
+      # Host-side path of the Botsman repo — used by the DevOps "update botsman" op.
+      BOTSMAN_REPO_DIR: ${BOTSMAN_REPO_DIR:-/opt/botsman}
     volumes:
       # All state: config.json (0600), SQLite, projects, bare repos, logs.
       - ${BOTSMAN_HOME:-~/.botsman}:/data

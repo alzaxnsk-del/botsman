@@ -94,6 +94,15 @@ Full setup, including the DNS wildcard record, is in [docs/install.md](docs/inst
 | `/rollback <project>` | Roll back to the previous working version |
 | `/setup` | Change agent auth, domain or telemetry — right in the chat |
 | `/delete <project>` | Stop and remove a project (asks for confirmation) |
+| `/server` `/projects` `/home` | Switch rooms (see below) |
+
+### Rooms
+
+Persistent buttons under the message box switch between three ways of talking to Botsman:
+
+- **🏠 Home** — create and change services (the default flow).
+- **🛠 Server** — a DevOps assistant you talk to in plain language: "show the load", "clean up disk", "restart todo", "redeploy todo", "update the server". Read actions (metrics, logs, diagnosis) run immediately; anything that changes state asks for a one-tap confirmation — host-level actions (OS update, Botsman self-update) ask twice.
+- **📦 Projects** — enter a project and keep developing in chat. A message is routed as either a **change** ("add a dark theme" → redeploys) or a **question** ("how is this built?", "what's in the logs?" → answered without deploying).
 
 ---
 

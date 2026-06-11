@@ -1,10 +1,19 @@
-import { Bot, InlineKeyboard, InputFile, type Context } from 'grammy';
+import { Bot, InlineKeyboard, type Context } from 'grammy';
+import { InputFile } from 'grammy';
+import type Dockerode from 'dockerode';
 import fs from 'node:fs';
 import { logger } from '../logger.js';
 import { detectIntent } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, type FixId } from '../doctor.js';
 import { updateConfigFile } from '../config.js';
+import { getRoom, setRoom, roomLabel, roomKeyboard, detectRoomSwitch, type Room } from './rooms.js';
+import {
+  routeDevOps, runReadOp, runMutatingOp, routeProjectMessage, missingSlugPrompt,
+  type DevOpsOp, type DevOpsDeps,
+} from './devops.js';
+import type { StructuredLlm } from '../llm.js';
+import type { HostExec } from '../hostExec.js';
 import type { Orchestrator, TaskOutcome } from '../orchestrator.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
@@ -34,6 +43,8 @@ export class TelegramGateway {
   private pendingDelete = new Map<number, string>();
   /** free text awaiting "new or edit?" disambiguation, keyed by chat; messageId guards stale buttons. */
   private pendingAmbiguous = new Map<number, { messageId: number; text: string }>();
+  /** DevOps op awaiting a confirm button; messageId guards stale clicks. */
+  private pendingDevOps = new Map<number, { messageId: number; op: DevOpsOp; confirmed: boolean }>();
 
   constructor(
     private token: string,
@@ -42,9 +53,24 @@ export class TelegramGateway {
     private store: Store,
     private deployEngine: DeployEngine,
     private telemetry: Telemetry,
+    private docker: Dockerode,
+    private hostExec: HostExec,
+    private hostRepoDir: string,
+    private structuredLlm?: StructuredLlm,
   ) {
     this.bot = new Bot(token);
     this.wire();
+  }
+
+  private devopsDeps(): DevOpsDeps {
+    return {
+      store: this.store,
+      docker: this.docker,
+      deployEngine: this.deployEngine,
+      orchestrator: this.orchestrator,
+      hostExec: this.hostExec,
+      hostRepoDir: this.hostRepoDir,
+    };
   }
 
   private isOwner(ctx: Context): boolean {
@@ -73,6 +99,11 @@ export class TelegramGateway {
           '',
           "In a few minutes you'll get a link and a screenshot. Iterate in this same chat.",
           '',
+          'Rooms (buttons below the message box):',
+          '🏠 Home — create & change services',
+          '🛠 Server — ask about the server in plain language (load, disk, restarts, updates)',
+          '📦 Projects — enter a project to keep developing or ask questions about it',
+          '',
           'Commands:',
           '/list — all projects',
           '/status <slug> — status and git access',
@@ -82,13 +113,14 @@ export class TelegramGateway {
           '/delete <slug> — delete a project',
           '/setup — change agent auth, domain or telemetry',
         ].join('\n'),
+        { reply_markup: roomKeyboard() },
       ),
     );
 
     this.bot.command('list', async (ctx) => {
       const projects = this.store.listProjects();
       if (!projects.length) {
-        await ctx.reply('No projects yet. Describe a service — and I will build it.');
+        await ctx.reply('No projects yet. Describe a service — and I will build it.', { reply_markup: roomKeyboard() });
         return;
       }
       const lines = await Promise.all(
@@ -100,7 +132,14 @@ export class TelegramGateway {
           return `${mark} *${p.slug}* — ${p.status}\nhttps://${p.domain}/`;
         }),
       );
-      await ctx.reply(lines.join('\n\n'), { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } });
+      // Tappable: each project enters its room.
+      const kb = new InlineKeyboard();
+      for (const p of projects) kb.text(`📦 ${p.slug}`, `room:project:${p.slug}`).row();
+      await ctx.reply(lines.join('\n\n'), {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true },
+        reply_markup: kb,
+      });
     });
 
     this.bot.command('status', async (ctx) => {
@@ -205,6 +244,48 @@ export class TelegramGateway {
         return;
       }
 
+      // Enter a project room from the /list or /projects picker.
+      if (data.startsWith('room:project:')) {
+        await ctx.answerCallbackQuery();
+        const slug = data.slice('room:project:'.length);
+        if (!this.store.projectExists(slug)) return void ctx.reply('That project no longer exists.');
+        await this.switchRoom(ctx, { kind: 'project', slug });
+        return;
+      }
+
+      // DevOps confirm / cancel (with a second confirm for host-level ops).
+      if (data === 'devops:exec' || data === 'devops:cancel' || data === 'devops:exec2') {
+        const entry = this.pendingDevOps.get(chatId);
+        if (!entry || entry.messageId !== ctx.callbackQuery.message?.message_id) {
+          await ctx.answerCallbackQuery({ text: 'This button is stale.' });
+          return;
+        }
+        if (data === 'devops:cancel') {
+          this.pendingDevOps.delete(chatId);
+          await ctx.answerCallbackQuery({ text: 'Cancelled' });
+          await this.bot.api.editMessageText(chatId, entry.messageId, 'Cancelled.').catch(() => {});
+          return;
+        }
+        // First click on a host-level op → ask for a SECOND confirmation.
+        if (entry.op.hostLevel && !entry.confirmed && data === 'devops:exec') {
+          entry.confirmed = true;
+          await ctx.answerCallbackQuery();
+          const kb = new InlineKeyboard().text('⚠️ Yes, do it', 'devops:exec2').text('✖️ Cancel', 'devops:cancel');
+          await this.bot.api.editMessageText(
+            chatId, entry.messageId,
+            `${entry.op.humanSummary}\n\nThis touches the host. Are you sure?`,
+            { reply_markup: kb },
+          ).catch(() => {});
+          return;
+        }
+        this.pendingDevOps.delete(chatId);
+        await ctx.answerCallbackQuery({ text: 'Working…' });
+        await this.bot.api.editMessageText(chatId, entry.messageId, `⏳ ${entry.op.humanSummary}…`).catch(() => {});
+        const result = await runMutatingOp(entry.op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
+        await this.editMdSafe(chatId, entry.messageId, result);
+        return;
+      }
+
       await ctx.answerCallbackQuery();
       const pending = this.pendingAmbiguous.get(chatId);
       // A click on an outdated question must not apply the latest text.
@@ -218,6 +299,11 @@ export class TelegramGateway {
         await this.runTask('edit', data.slice('intent:edit:'.length), pending.text, ctx);
       }
     });
+
+    // Room switch commands (same logic as the persistent keyboard buttons).
+    this.bot.command('home', (ctx) => this.switchRoom(ctx, { kind: 'home' }));
+    this.bot.command('server', (ctx) => this.switchRoom(ctx, { kind: 'devops' }));
+    this.bot.command('projects', (ctx) => this.showProjectPicker(ctx));
 
     this.bot.on('message:text', async (ctx) => {
       const chatId = ctx.chat.id;
@@ -236,30 +322,109 @@ export class TelegramGateway {
         return;
       }
 
-      const intent = detectIntent(
-        text,
-        this.store.listProjects().map((p) => p.slug),
-        this.store.kvGet(`last_active:${chatId}`),
-      );
+      // Room switching wins over everything: instant, deterministic.
+      const slugs = this.store.listProjects().map((p) => p.slug);
+      const switchTo = detectRoomSwitch(text, slugs);
+      if (switchTo === 'projects') return void this.showProjectPicker(ctx);
+      if (switchTo) return void this.switchRoom(ctx, switchTo);
 
-      if (intent.kind === 'ambiguous') {
-        const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
-        if (intent.lastSlug && this.store.projectExists(intent.lastSlug)) {
-          kb.text(`✏️ Edit ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
-        }
-        const sent = await ctx.reply('Is this a new service or a change to an existing one?', { reply_markup: kb });
-        this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text });
-        return;
-      }
-
-      if (intent.kind === 'create') {
-        await this.runTask('create', undefined, intent.description, ctx);
-      } else {
-        await this.runTask('edit', intent.slug, intent.instruction, ctx);
-      }
+      const room = getRoom(this.store, chatId);
+      if (room.kind === 'devops') return this.handleDevOps(ctx, text);
+      if (room.kind === 'project') return this.handleProjectMessage(ctx, room.slug, text);
+      return this.handleHome(ctx, text);
     });
 
     this.bot.catch((err) => logger.error('telegram handler error', { error: String(err.error) }));
+  }
+
+  // --- room handlers ---
+
+  private async switchRoom(ctx: Context, room: Room): Promise<void> {
+    setRoom(this.store, ctx.chat!.id, room);
+    const hint =
+      room.kind === 'devops'
+        ? 'Ask me about the server: "show load", "clean up disk", "restart <project>", "update the server".'
+        : room.kind === 'project'
+          ? `Develop ${room.slug} in chat: make changes ("add a dark theme") or ask questions ("how is this built?").`
+          : 'Describe a new service, or switch to 🛠 Server / 📦 Projects anytime.';
+    await ctx.reply(`You're now in ${roomLabel(room)}.\n${hint}`, { reply_markup: roomKeyboard() });
+  }
+
+  private async showProjectPicker(ctx: Context): Promise<void> {
+    const projects = this.store.listProjects();
+    if (!projects.length) {
+      await ctx.reply('No projects yet. Switch to 🏠 Home and describe one.', { reply_markup: roomKeyboard() });
+      return;
+    }
+    const kb = new InlineKeyboard();
+    for (const p of projects) kb.text(`📦 ${p.slug}`, `room:project:${p.slug}`).row();
+    await ctx.reply('Pick a project to work on:', { reply_markup: kb });
+  }
+
+  /** Home room: today's create/edit heuristic, unchanged. */
+  private async handleHome(ctx: Context, text: string): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const intent = detectIntent(
+      text,
+      this.store.listProjects().map((p) => p.slug),
+      this.store.kvGet(`last_active:${chatId}`),
+    );
+    if (intent.kind === 'ambiguous') {
+      const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
+      if (intent.lastSlug && this.store.projectExists(intent.lastSlug)) {
+        kb.text(`✏️ Edit ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
+      }
+      const sent = await ctx.reply('Is this a new service or a change to an existing one?', { reply_markup: kb });
+      this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text });
+      return;
+    }
+    if (intent.kind === 'create') await this.runTask('create', undefined, intent.description, ctx);
+    else await this.runTask('edit', intent.slug, intent.instruction, ctx);
+  }
+
+  /** DevOps room: route to an op; read ops run now, mutations confirm first. */
+  private async handleDevOps(ctx: Context, text: string): Promise<void> {
+    if (!this.structuredLlm) {
+      await ctx.reply('The DevOps assistant needs an LLM, which is unavailable. Use /doctor and /logs meanwhile.');
+      return;
+    }
+    const slugs = this.store.listProjects().map((p) => p.slug);
+    const thinking = await ctx.reply('🛠 …');
+    const op = await routeDevOps(this.structuredLlm, text, slugs);
+    if (!op) {
+      await this.bot.api.editMessageText(
+        ctx.chat!.id, thinking.message_id,
+        "I didn't catch a server action. Try: show load · containers · logs <project> · doctor <project> · " +
+        'restart <project> · redeploy <project> · rollback <project> · restart proxy · clean disk · update botsman · update host.',
+      ).catch(() => {});
+      return;
+    }
+    const need = missingSlugPrompt(op);
+    if (need) {
+      await this.bot.api.editMessageText(ctx.chat!.id, thinking.message_id, need).catch(() => {});
+      return;
+    }
+    if (!op.mutating) {
+      const result = await runReadOp(op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
+      await this.editMdSafe(ctx.chat!.id, thinking.message_id, result);
+      return;
+    }
+    // Mutation → confirm button (host-level ops get a second confirm later).
+    const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
+    await this.bot.api.editMessageText(ctx.chat!.id, thinking.message_id, `${op.humanSummary}?`, { reply_markup: kb }).catch(() => {});
+    this.pendingDevOps.set(ctx.chat!.id, { messageId: thinking.message_id, op, confirmed: false });
+  }
+
+  /** Project room: edit (deploy) or question (read-only answer). */
+  private async handleProjectMessage(ctx: Context, slug: string, text: string): Promise<void> {
+    const route = await routeProjectMessage(this.structuredLlm, text);
+    if (route.kind === 'edit') {
+      await this.runTask('edit', slug, route.instruction, ctx);
+      return;
+    }
+    const thinking = await ctx.reply('🤔 Looking into it…');
+    const res = await this.orchestrator.askProject(slug, route.question);
+    await this.editMdSafe(ctx.chat!.id, thinking.message_id, res.answer || 'No answer.');
   }
 
   /** Run a long task with a live-updating status message + 30s heartbeat. */
@@ -373,6 +538,19 @@ export class TelegramGateway {
     if (fixes.includes('app')) kb.text('▶️ Restart service', `fix:app:${slug}`);
     if (fixes.includes('recheck')) kb.row().text('🔄 Re-check', `fix:recheck:${slug}`);
     return kb;
+  }
+
+  /** Edit a message as Markdown, falling back to plain text if it won't parse. */
+  private async editMdSafe(chatId: number, messageId: number, text: string): Promise<void> {
+    const body = text.slice(0, 4000);
+    try {
+      await this.bot.api.editMessageText(chatId, messageId, body, {
+        parse_mode: 'Markdown',
+        link_preview_options: { is_disabled: true },
+      });
+    } catch {
+      await this.bot.api.editMessageText(chatId, messageId, body).catch(() => {});
+    }
   }
 
   /** Markdown with arbitrary content (logs, commit subjects) may not parse — fall back to plain. */
