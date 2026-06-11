@@ -15,7 +15,7 @@ import { DockerDeployEngine, SERVICE_PORT } from './deploy/engine.js';
 import { PostgresAdmin, dbEnvFor } from './deploy/postgres.js';
 import { Orchestrator } from './orchestrator.js';
 import { TelegramGateway } from './gateway/telegram.js';
-import { startControlServer, CONTROL_PORT } from './control.js';
+import { startControlServer, startHealthServer, CONTROL_PORT } from './control.js';
 import { preflight } from './preflight.js';
 import { runSetupWizard } from './setup.js';
 import { suggestSlugLLM, suggestSlugCLI } from './naming.js';
@@ -79,6 +79,9 @@ async function main(): Promise<void> {
     await telemetry.onInstall();
     const onboarding = new OnboardingBot(config.telegramBotToken, config.ownerIds, store);
     await onboarding.start();
+    // Answer the installer's healthcheck so it reports success and points the
+    // user to Telegram, instead of timing out with a scary error mid-onboarding.
+    startHealthServer();
     logger.info('running in onboarding mode', { missing: missingSetup(config) });
     return; // long-polling keeps the process alive
   }
