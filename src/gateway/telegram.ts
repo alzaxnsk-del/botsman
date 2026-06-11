@@ -2,7 +2,9 @@ import { Bot, InlineKeyboard, type Context } from 'grammy';
 import { InputFile } from 'grammy';
 import type Dockerode from 'dockerode';
 import fs from 'node:fs';
+import path from 'node:path';
 import { logger } from '../logger.js';
+import { paths } from '../paths.js';
 import { detectIntent, looksLikeCreate } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, type FixId } from '../doctor.js';
@@ -15,7 +17,7 @@ import {
 } from './devops.js';
 import type { StructuredLlm } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
-import type { Orchestrator, TaskOutcome } from '../orchestrator.js';
+import { MEMORY_FILE, type Orchestrator, type TaskOutcome } from '../orchestrator.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
 import type { DeployEngine } from '../deploy/engine.js';
@@ -112,6 +114,7 @@ export class TelegramGateway {
           '/list — all projects',
           '/status <slug> — status and git access',
           '/logs <slug> — container logs',
+          '/memory <slug> — what the agent remembers about a project',
           '/doctor <slug> — diagnose problems, with one-tap fixes',
           '/rollback <slug> — roll back to the previous version',
           '/delete <slug> — delete a project',
@@ -160,6 +163,21 @@ export class TelegramGateway {
       if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
       const logs = await this.deployEngine.containerLogs(slug, 50).catch((e) => `Error: ${e.message}`);
       await this.replyMdSafe(ctx, `Logs for ${slug} (last lines):\n\`\`\`\n${logs.slice(-3500) || '(empty)'}\n\`\`\``);
+    });
+
+    // View the project's memory (CLAUDE.md) — what the agent persists across
+    // iterations. Read-only here; edit it via `git clone` + push.
+    this.bot.command('memory', async (ctx) => {
+      const slug = this.argSlug(ctx);
+      if (!slug) return void ctx.reply('Usage: /memory <slug>');
+      if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
+      let content = '';
+      try {
+        content = fs.readFileSync(path.join(paths.projectDir(slug), MEMORY_FILE), 'utf8');
+      } catch {
+        return void ctx.reply(`No memory recorded yet for ${slug}.`);
+      }
+      await this.replyMdSafe(ctx, `Memory for ${slug} (CLAUDE.md):\n\`\`\`\n${content.slice(-3500) || '(empty)'}\n\`\`\``);
     });
 
     this.bot.command('rollback', async (ctx) => {
