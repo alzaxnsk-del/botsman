@@ -46,6 +46,27 @@ describe('scanForSecrets (AC-B5)', () => {
     expect(scanForSecrets(dir)).toHaveLength(0);
   });
 
+  it('does not flag placeholder connection strings in .env.example (the reported false positive)', () => {
+    fs.writeFileSync(
+      path.join(dir, '.env.example'),
+      'DATABASE_URL=postgres://user:password@localhost:5432/app\nPGPASSWORD=changeme',
+    );
+    expect(scanForSecrets(dir)).toHaveLength(0);
+  });
+
+  it('does not flag placeholder credentials in code/README examples', () => {
+    fs.writeFileSync(path.join(dir, 'README.md'),
+      'Example: `postgres://postgres:postgres@db:5432/app` or `mysql://user:your_password@localhost/db`.');
+    fs.writeFileSync(path.join(dir, 'setup.sample'), 'DSN=postgres://admin:examplepass@host/db');
+    expect(scanForSecrets(dir)).toHaveLength(0);
+  });
+
+  it('still flags a REAL password in a connection string', () => {
+    fs.writeFileSync(path.join(dir, 'db.js'), 'connect("postgres://produser:Xk9mPq2zR7@prod-db.internal/app")');
+    const findings = scanForSecrets(dir);
+    expect(findings.some((f) => f.pattern === 'Hardcoded password in URL')).toBe(true);
+  });
+
   it('skips .env, node_modules and .git', () => {
     fs.writeFileSync(path.join(dir, '.env'), 'KEY=sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA');
     fs.mkdirSync(path.join(dir, 'node_modules'));
