@@ -275,13 +275,18 @@ export class TelegramGateway {
 
     let lastText = STAGE_LABELS.accepted;
     let dots = 0;
+    // Once the outcome is being reported, stage/heartbeat edits must stop —
+    // an in-flight "✅ Done" edit racing the rich final message would win.
+    let finished = false;
     const update = async (text: string) => {
+      if (finished) return;
       lastText = text;
       dots = 0;
       await this.bot.api.editMessageText(chatId, statusMsg.message_id, text).catch(() => {});
     };
     // Heartbeat: append dots so the user sees progress even in long stages (AC-F2 responsiveness).
     const heartbeat = setInterval(() => {
+      if (finished) return;
       dots = (dots % 3) + 1;
       void this.bot.api
         .editMessageText(chatId, statusMsg.message_id, `${lastText}${'.'.repeat(dots)}`)
@@ -294,16 +299,23 @@ export class TelegramGateway {
         instruction,
         (stage, detail) => {
           if (stage === 'accepted' && detail) slug = detail;
+          // 'done'/'failed' are not shown as stages: the rich outcome message
+          // (link, summary, screenshot) supersedes them.
+          if (stage === 'done' || stage === 'failed') return;
           void update(`${STAGE_LABELS[stage]}${detail && stage !== 'accepted' ? ` — ${detail}` : ''}`);
         },
         slug,
       );
+      finished = true;
       clearInterval(heartbeat);
       await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome);
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
     } catch (e) {
       clearInterval(heartbeat);
-      await update(`${STAGE_LABELS.failed} — ${(e as Error).message}`);
+      finished = true;
+      await this.bot.api.editMessageText(
+        chatId, statusMsg.message_id, `${STAGE_LABELS.failed} — ${(e as Error).message}`,
+      ).catch(() => {});
     }
   }
 

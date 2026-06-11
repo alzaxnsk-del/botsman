@@ -70,6 +70,8 @@ describe('project git lifecycle (EPIC C)', () => {
     const hookBody = fs.readFileSync(hook, 'utf8');
     expect(hookBody).toContain('/hooks/push/todo');
     expect(hookBody).toContain('X-Botsman-Token: sekret');
+    // the daemon's own syncs must not echo a phantom push-to-deploy
+    expect(hookBody).toContain('BOTSMAN_INTERNAL_PUSH');
 
     // user clones, commits, pushes
     const clone = path.join(home, 'clone');
