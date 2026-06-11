@@ -19,41 +19,11 @@ export async function runSetupWizard(): Promise<number> {
 
   const ask = async (label: string, current?: string): Promise<string> => {
     const hintStr = current ? c.dim(` [Enter = keep ${current}]`) : '';
+    // Single line, one Enter. The bot token is short and pastes cleanly; the
+    // long Anthropic/subscription token (which used to mangle on paste) is now
+    // collected in the Telegram chat, not here, so no multi-line field is needed.
     const a = (await rl.question(`${PROMPT}${label}${hintStr}: `)).trim();
     return a || current || '';
-  };
-
-  // NB: collected via the 'line' event, NOT rl.question in a loop — readline
-  // drops lines that arrive between questions, so a fast multi-line paste
-  // would lose every chunk after the first.
-  const askSecret = (label: string, current?: string): Promise<string> => {
-    const hintStr = current ? c.dim(` [Enter = keep ${mask(current)}]`) : '';
-    say(`${PROMPT}${label}${hintStr}`);
-    hint('paste the value (multi-line is fine), then press Enter on an empty line');
-    stdout.write(PROMPT);
-    return new Promise((resolve) => {
-      const parts: string[] = [];
-      const onLine = (raw: string) => {
-        const line = raw.replace(/\s+/g, '');
-        if (!line) {
-          if (parts.length) {
-            rl.off('line', onLine);
-            resolve(parts.join(''));
-            return;
-          }
-          if (current) {
-            rl.off('line', onLine);
-            resolve(current);
-            return;
-          }
-          stdout.write(PROMPT); // nothing pasted yet — keep waiting
-          return;
-        }
-        parts.push(line);
-        stdout.write(PROMPT);
-      };
-      rl.on('line', onLine);
-    });
   };
 
   banner('Two quick questions — the rest happens in the Telegram chat');
@@ -61,8 +31,8 @@ export async function runSetupWizard(): Promise<number> {
 
   try {
     stepHeader(1, 2, 'Telegram bot token');
-    hint('Create a bot with @BotFather and paste its token.');
-    const telegramBotToken = await askSecret('Bot token', prev?.telegramBotToken);
+    hint('Create a bot with @BotFather and paste its token (one line).');
+    const telegramBotToken = await ask('Bot token', prev?.telegramBotToken);
     hint('checking…');
     const tg = await checkTelegramToken(telegramBotToken);
     if (!tg.ok) {
@@ -123,8 +93,4 @@ function loadExistingConfig(): Record<string, unknown> & {
   } catch {
     return null;
   }
-}
-
-function mask(s: string): string {
-  return s.length > 8 ? `…${s.slice(-4)}` : '…';
 }
