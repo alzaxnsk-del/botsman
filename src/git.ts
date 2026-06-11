@@ -7,7 +7,13 @@ import { paths } from './paths.js';
 const execFileP = promisify(execFile);
 
 export const AGENT_COMMIT_PREFIX = 'botsman:';
-const GIT_AUTHOR = ['-c', 'user.name=botsman', '-c', 'user.email=botsman@localhost'];
+// safe.directory=*: the root daemon must operate on repos whose files the
+// unprivileged agent (uid 1000) created — git would refuse "dubious ownership".
+const GIT_AUTHOR = [
+  '-c', 'user.name=botsman',
+  '-c', 'user.email=botsman@localhost',
+  '-c', 'safe.directory=*',
+];
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileP('git', [...GIT_AUTHOR, ...args], {
