@@ -2,9 +2,37 @@
 
 **Describe a web service in a chat message. Botsman builds it, deploys it to your own server with a real domain and HTTPS, and sends you back a working link.**
 
+[![status: alpha](https://img.shields.io/badge/status-alpha-orange)](#early-stage)
+[![license: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![chat: Telegram](https://img.shields.io/badge/chat-Telegram-26A5E4)](https://t.me/BotFather)
+[![bring your own key](https://img.shields.io/badge/LLM-bring%20your%20own%20key-2ea44f)](#requirements)
+
 Botsman runs on your VPS. You talk to it from Telegram (or push code from your laptop). A coding agent writes the service, Botsman containerizes it, gives it a subdomain with automatic TLS, runs a smoke check, and replies with a link and a screenshot. Want a change? Just say so in the chat. Your code, your server, your API key — nothing is resold or locked in.
 
-> ⚠️ **Early stage.** Botsman is in active early development. Expect rough edges, breaking changes, and missing features. Do **not** run it on a server hosting anything you can't afford to lose. See [Security](#security) before installing.
+```
+You:      make a TODO service with a task list and a way to mark tasks done
+Botsman:  ✓ todo.yourdomain.com — deployed     [link]  [screenshot]
+          What would you like to change?
+You:      add a dark theme
+Botsman:  ✓ Updated. Same link.
+```
+
+> ### Early stage
+> ⚠️ Botsman is in active early development. Expect rough edges, breaking changes, and missing features. Do **not** run it on a server hosting anything you can't afford to lose. Read [Security](#security) before installing.
+
+---
+
+## Contents
+
+- [Why](#why)
+- [How it works](#how-it-works)
+- [Key ideas](#key-ideas)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Using it](#using-it) — [talking](#how-you-talk-to-it) · [rooms & focus](#rooms--focus) · [commands](#slash-commands) · [memory](#project-memory)
+- [Security](#security)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing) · [License](#license)
 
 ---
 
@@ -48,7 +76,7 @@ Under the hood:
 ## Key ideas
 
 - **Your server, your code.** Everything runs on your VPS. Each project is a plain git repo on disk — clone it, edit it in any IDE, push to redeploy. Leaving Botsman is one `git clone` away (which is exactly why you won't need to).
-- **Bring your own key.** Botsman never proxies or resells LLM tokens. You plug in your own API key (or subscription). Your bill for intelligence stays yours and transparent.
+- **Bring your own key.** Botsman never proxies or resells LLM tokens. You plug in your own Claude subscription or API key, and pick the model. Your bill for intelligence stays yours and transparent.
 - **Phone and laptop are equal doors.** Sketch a service from Telegram on your commute, finish it by hand in your editor in the evening — same project, no migration.
 - **Boring, predictable deploys.** One supported service stack, containerized, with health checks and one-command rollback. Magic where it helps, predictability where it matters.
 
@@ -56,63 +84,88 @@ Under the hood:
 
 ## Requirements
 
-- A Linux VPS (Ubuntu 22.04 or 24.04), 2 vCPU / 4 GB RAM is a comfortable starting point.
-- A domain with a **wildcard DNS record** pointing at your server, e.g. `*.yourdomain.com → <your server IP>`.
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather)) and your Telegram user ID.
-- Auth for the coding agent — either of:
-  - your **Claude subscription** (Pro/Max): generate a token with `claude setup-token` on a machine where you're logged into Claude Code — no extra API bills, usage counts against your plan limits;
-  - an **Anthropic API key** (pay-per-use, [console.anthropic.com](https://console.anthropic.com)).
+| What | Notes |
+|---|---|
+| **A Linux VPS** | Ubuntu 22.04 / 24.04, 2 vCPU / 4 GB RAM, ports 80 + 443 open |
+| **A domain** | with a **wildcard DNS record** `*.yourdomain.com → <server IP>` (the bot shows you the exact record and checks it live) |
+| **A Telegram bot** | token from [@BotFather](https://t.me/BotFather) + your user ID from [@userinfobot](https://t.me/userinfobot) |
+| **Coding-agent auth** | either a **Claude subscription** (`claude setup-token` → `sk-ant-oat…`, no extra bills) **or** an **Anthropic API key** ([console.anthropic.com](https://console.anthropic.com), pay-per-use) |
 
 ---
 
 ## Quick start
 
-Have a domain ready: each project gets its own subdomain under a base domain you choose (e.g. `yourdomain.com` → `todo.yourdomain.com`). The bot shows you the exact wildcard DNS record to create — with this server's IP — and verifies it live during setup. On Cloudflare, the record must be **DNS only** (grey cloud).
+**1. Point a wildcard DNS record at your server.** An A-record with host `*` → your server's IP, so `anything.yourdomain.com` resolves to it. On Cloudflare, set it to **DNS only** (grey cloud) — the proxy breaks Let's Encrypt. Verify: `dig +short anything.yourdomain.com` → your server IP. (The setup wizard checks this for you too.)
+
+**2. Install.**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
 ```
 
-The installer sets up Docker (if needed), starts the Botsman daemon and reverse proxy, and asks just **two questions** in the console: your bot token (from @BotFather) and your Telegram user ID. Everything else — coding agent auth (Claude subscription or API key), domain with a live DNS check, telemetry — the bot collects **right in the Telegram chat**, with buttons and validation. Secrets pasted into the chat are deleted immediately after being saved.
+The installer sets up Docker (if needed), starts the daemon + reverse proxy, and asks just **two questions** in the console: your bot token and your Telegram user ID.
 
-Installing **as root is fine** (the typical fresh VPS): the daemon runs as root, while the coding agent and every deployed service always run as unprivileged users in their own containers.
+**3. Finish in the chat.** Open Telegram, send your bot `/start`, and it walks you through the rest with buttons and live validation:
 
-Full setup, including the DNS wildcard record, is in [docs/install.md](docs/install.md). Полная операционная документация на русском — [docs/README.ru.md](docs/README.ru.md).
+- **Coding agent** — Claude subscription or API key (the secret is deleted from the chat the moment it's saved);
+- **Model** — 🏆 Opus (best) / ⚖️ Sonnet / ⚡ Haiku, changeable anytime via `/setup`;
+- **Domain** — it shows the exact DNS record (with your server's IP) and checks it live;
+- **Telemetry** — one tap, off by default.
+
+Then describe your first service. Installing **as root is fine** — the daemon runs as root, but the coding agent and every deployed service always run as unprivileged users in isolated containers.
+
+> Full walkthrough (DNS, config reference, uninstall) → [docs/install.md](docs/install.md). Документация на русском → [docs/README.ru.md](docs/README.ru.md).
 
 ---
 
-## Commands
+## Using it
+
+### How you talk to it
+
+There are no modes to remember — write what you want, and Botsman routes it by meaning:
+
+| You say… | Botsman… |
+|---|---|
+| "make a TODO app" | **builds** and deploys a new service |
+| "add a dark theme" | **changes** the service you're working on and redeploys |
+| "how is this built?", "what's in the logs?" | **answers** — without deploying |
+| "show the load", "clean up disk", "restart todo", "update the server" | runs **server ops** |
+
+Server reads (metrics, logs, diagnosis) run immediately; anything that changes state asks for a one-tap confirmation, and host-level actions (OS update, Botsman self-update) ask twice.
+
+**Botsman never silently guesses.** If a message could be a new project or a change to an existing one — or it's unclear which project — it **asks with buttons** ("Change 📦 todo? · 🆕 New project") instead of acting. Before building something whose name resembles an existing project, it checks with you first.
+
+### Rooms & focus
+
+The persistent buttons below the message box are shortcuts, not modes:
+
+- **🔗 Connect to a project** (tap it under **📦 Projects**, or say "go to todo") — while connected, every change and question goes straight to it with no prompts. Tap **🏠** to disconnect.
+- Not connected? Routing is by content, and anything ambiguous is confirmed first.
+
+### Slash commands
 
 | Command | What it does |
 |---|---|
 | `/start` | Intro and a quick how-to |
-| *(free text)* | Create a new service, or change the one you're working on |
+| *(free text)* | Create a service, change one, ask a question, or run a server op |
 | `/list` | All your projects with status and links |
 | `/status <project>` | Status, link, and the git clone URL |
 | `/logs <project>` | Recent logs from the service |
-| `/memory <project>` | What the agent remembers about the project (its `CLAUDE.md`) |
-| `/doctor <project>` | Diagnose problems (container, DNS, TLS) with one-tap fixes |
+| `/memory <project>` | What the agent remembers about the project |
+| `/doctor <project>` | Diagnose container / DNS / TLS, with one-tap fixes |
 | `/rollback <project>` | Roll back to the previous working version |
-| `/setup` | Change agent auth, domain or telemetry — right in the chat |
 | `/delete <project>` | Stop and remove a project (asks for confirmation) |
-| `/server` `/projects` `/home` | Switch rooms (see below) |
-
-### Talking to Botsman
-
-There are no modes to remember — just write what you want and Botsman routes it by meaning:
-
-- **Build** — "make a TODO app" → creates and deploys a new service.
-- **Change** — "add a dark theme" → edits the service you're working on and redeploys.
-- **Ask** — "how is this built?", "what's in the logs?" → answered without deploying.
-- **Operate the server** — "show the load", "clean up disk", "restart todo", "redeploy todo", "update the server" → server ops. Reads run immediately; anything that changes state asks for a one-tap confirmation, and host-level actions (OS update, Botsman self-update) ask twice.
-
-Botsman never silently guesses when it's unsure. If a message could be a new project or a change to an existing one — or it's unclear which project — it **asks with buttons** ("Change 📦 todo? · 🆕 New project") instead of acting. Before building something whose name resembles an existing project, it checks with you first.
-
-For focused work, **connect to a project**: tap it under 📦 Projects (or say "go to todo"). While connected, every change and question goes straight to it with no prompts — tap **🏠** to disconnect. Not connected? Routing is by content, and anything ambiguous is confirmed first.
+| `/setup` | Change agent auth, model, domain or telemetry |
 
 ### Project memory
 
-Each project keeps a `CLAUDE.md` at its root — the coding agent's durable memory across iterations. It's auto-loaded into the agent every run (create, edit, and questions), and the agent maintains it: what the service does, key decisions and *why*, conventions, your preferences, and "don't break X" notes. It's committed to git (so it travels with `git clone` and is restored on `/rollback`), kept concise, and scanned for secrets like any other file — only env-var **names** are ever recorded, never values. View it with `/memory <project>`; edit it by cloning the repo and pushing.
+Each project keeps a `CLAUDE.md` at its root — the coding agent's durable memory across iterations. It's auto-loaded into the agent on every run (create, edit, and questions), and the agent maintains it: what the service does, key decisions and *why*, conventions, your preferences, and "don't break X" notes.
+
+It's committed to git (so it travels with `git clone` and is restored on `/rollback`), kept concise, and scanned for secrets like any other file — only env-var **names** are recorded, never values. View it with `/memory <project>`; edit it by cloning the repo and pushing.
+
+### From your editor
+
+`/status <project>` shows a git clone URL. Clone it, edit on your laptop, and `git push` — Botsman redeploys automatically and tells you in the chat. Agent commits are prefixed `botsman:`; yours are not.
 
 ---
 
@@ -121,20 +174,21 @@ Each project keeps a `CLAUDE.md` at its root — the coding agent's durable memo
 Botsman gives a coding agent the ability to run code and deploy services on your server. Take that seriously.
 
 **What Botsman does to contain it:**
+
 - Each deployed service runs in its own container, as a non-root user, with resource limits, on its own network.
-- The coding agent only writes inside its own project directory. It has no access to other projects or to Botsman's config.
-- Your Telegram token and Botsman's config live only in a config file (`chmod 600`) and in daemon memory — never mounted into any container, never committed to git. The LLM API key is handed only to the agent's throwaway container (it needs it to generate code) and never reaches deployed services. Per-project database credentials are injected into the service's environment only — never written into the project's git repo.
-- The Telegram gateway only responds to your whitelisted account.
-- Destructive actions require explicit confirmation.
+- The coding agent runs in a throwaway container with only its project directory mounted — no access to other projects, the Docker socket, or Botsman's config.
+- Your Telegram token and Botsman's config live only in a `chmod 600` file and in daemon memory — never mounted into any container, never committed to git. The LLM key is handed only to the agent's container and never reaches deployed services. Per-project database credentials are injected into the service's environment only.
+- The Telegram gateway only responds to your whitelisted account. Destructive actions require explicit confirmation.
 
 **What you should do:**
+
 - Run Botsman on a dedicated server, not alongside production systems or sensitive data — especially during early development.
 - Keep your config file and server access locked down.
 - Review what gets deployed before pointing real users at it.
 
-**Reporting a vulnerability:** please report security issues privately via [SECURITY.md](SECURITY.md) rather than opening a public issue. Responsible disclosure is appreciated and credited.
+> **Note:** the in-chat DevOps assistant can update the host OS and Botsman itself via a privileged container — full root on the host, reachable only from your owner account behind a double confirmation. Details and threat model in [SECURITY.md](SECURITY.md).
 
-This is an early project and has not yet had an external security audit. Treat it accordingly.
+**Reporting a vulnerability:** please report security issues privately (see [SECURITY.md](SECURITY.md)) rather than opening a public issue. This is an early project with no external security audit yet — treat it accordingly.
 
 ---
 
@@ -142,9 +196,9 @@ This is an early project and has not yet had an external security audit. Treat i
 
 Botsman is open-core. The single-user core in this repository is, and will remain, free and open source under Apache 2.0.
 
-- **Now:** single-user core — chat → deploy on your own server, one supported service stack, git-based iteration and rollback.
-- **Next:** more service stacks, web chat alongside Telegram, preview environments, better monitoring.
-- **Later (separate, commercial modules — not in this repo):** team features for people who run *many* projects — project isolation across clients, roles and deploy approvals, audit logs, per-client billing, and white-label client access. These are aimed at studios and agencies and are how the project sustains itself. The core never depends on them.
+- **Now** — single-user core: chat → deploy on your own server, one supported service stack, git-based iteration and rollback.
+- **Next** — more service stacks, web chat alongside Telegram, preview environments, better monitoring.
+- **Later** *(separate commercial modules, not in this repo)* — team features for people running *many* projects: client isolation, roles and deploy approvals, audit logs, per-client billing, white-label access. Aimed at studios and agencies, and how the project sustains itself. The core never depends on them.
 
 If you only ever use the open core, it stays fully functional forever.
 
@@ -154,10 +208,6 @@ If you only ever use the open core, it stays fully functional forever.
 
 Contributions, issues, and ideas are welcome. Because Botsman runs untrusted-ish generated code on people's servers, changes touching execution, isolation, or secrets handling get extra scrutiny — please open an issue to discuss before large PRs in those areas. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
----
-
 ## License
 
-Botsman core is licensed under the **Apache License 2.0**. See [LICENSE](LICENSE).
-
-In short: use it, modify it, run it, build on it — including commercially — with a standard patent grant for peace of mind. Future commercial team/agency modules are distributed separately under their own license and are not part of this repository.
+Botsman core is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE). Use it, modify it, run it, build on it (including commercially) with a standard patent grant. Future commercial team/agency modules are distributed separately under their own license and are not part of this repository.
