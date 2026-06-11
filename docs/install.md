@@ -105,7 +105,7 @@ Edit `~/.botsman/config.json`, then `docker compose restart botsman`.
 | `telemetry.endpoint` | no | without it nothing is ever sent, even if enabled |
 | `agent.maxTurns` | no | agent iteration cap per task (default 60) |
 | `agent.timeoutMs` | no | hard wall-clock cap per task (default 720000 = 12 min) |
-| `agent.model` | no | Claude model override |
+| `agent.model` | no | coding-agent model: `opus` (default — best quality), `sonnet` (balanced), or `haiku` (fastest). Pick it in onboarding or anytime via `/setup` → 🧠 Model |
 | `agent.image` | no | docker image for agent containers (default `botsman`) |
 | `docker.socketPath` | no | default `/var/run/docker.sock` |
 | `caddyAdminUrl` | no | default `unix:/run/caddy/admin.sock` |
