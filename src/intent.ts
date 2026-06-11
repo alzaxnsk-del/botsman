@@ -52,3 +52,10 @@ export function detectIntent(
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+/** Does the message read as "make me a new thing"? Used to keep create-phrased
+ *  messages out of the no-LLM edit fast-path (they must go to the LLM router,
+ *  which can tell "make me a shop" from an edit of the focused project). */
+export function looksLikeCreate(text: string): boolean {
+  return CREATE_VERBS.test(text.trim().toLowerCase());
+}

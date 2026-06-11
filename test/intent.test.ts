@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { detectIntent } from '../src/intent.js';
+import { detectIntent, looksLikeCreate } from '../src/intent.js';
+
+describe('looksLikeCreate', () => {
+  it('flags create-phrased messages (kept out of the edit fast-path)', () => {
+    expect(looksLikeCreate('make me a shop')).toBe(true);
+    expect(looksLikeCreate('build a snake game')).toBe(true);
+    expect(looksLikeCreate('сделай магазин')).toBe(true);
+    expect(looksLikeCreate('нужен лендинг')).toBe(true);
+  });
+  it('does not flag plain edits', () => {
+    expect(looksLikeCreate('add a dark theme')).toBe(false);
+    expect(looksLikeCreate('добавь кнопку')).toBe(false);
+  });
+});
 
 describe('detectIntent', () => {
   it('treats slug mention as edit', () => {

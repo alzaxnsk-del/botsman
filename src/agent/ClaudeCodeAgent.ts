@@ -81,7 +81,12 @@ export class ClaudeCodeAgent implements CodingAgent {
     const daemonGid = process.getgid?.() ?? 0;
     const runUid = daemonUid === 0 ? 1000 : daemonUid;
     const runGid = daemonGid === 0 ? 1000 : daemonGid;
-    if (daemonUid === 0) {
+    // 'ask' is read-only: mount the project read-only and skip the chown, so a
+    // question answered concurrently with a deploy can neither write the tree
+    // nor race the chown against the live build (the orchestrator never commits
+    // an ask run either).
+    const readOnly = input.mode === 'ask';
+    if (daemonUid === 0 && !readOnly) {
       await execFileP('chown', ['-R', `${runUid}:${runGid}`, input.projectDir]).catch((e) =>
         logger.warn('chown of project dir failed', { slug, error: (e as Error).message }));
     }
@@ -107,7 +112,7 @@ export class ClaudeCodeAgent implements CodingAgent {
         ],
         Labels: { [AGENT_LABEL]: slug },
         HostConfig: {
-          Binds: [`${hostDir}:/work`],
+          Binds: [readOnly ? `${hostDir}:/work:ro` : `${hostDir}:/work`],
           NetworkMode: 'bridge', // NOT botsman/project networks (§5)
           Memory: 2 * 1024 * 1024 * 1024,
           NanoCpus: 1_000_000_000,

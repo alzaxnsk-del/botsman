@@ -2,47 +2,38 @@ import { Keyboard } from 'grammy';
 import type { Store } from '../db.js';
 
 /**
- * Conversational rooms: the owner talks in one of three contexts and switches
- * between them. Switching is deterministic (regex + button texts) so it is
- * instant; within-room routing is the only place that uses an LLM.
+ * Soft context (not hard modes): routing is content-based — any message is
+ * classified by what it says, regardless of which button was last tapped. The
+ * only persistent state is an optional "focused project" that biases bare
+ * follow-ups ("make it dark" → the focused project). The reply keyboard is a
+ * focus shortcut, not a mode wall.
  */
 export type Room =
   | { kind: 'home' }
   | { kind: 'devops' }
   | { kind: 'project'; slug: string };
 
-const HOME: Room = { kind: 'home' };
+const focusKey = (chatId: number): string => `focus:${chatId}`;
 
-const roomKey = (chatId: number): string => `room:${chatId}`;
-
-export function getRoom(store: Store, chatId: number): Room {
-  const raw = store.kvGet(roomKey(chatId));
-  if (!raw) return HOME;
-  let parsed: Room;
-  try {
-    parsed = JSON.parse(raw) as Room;
-  } catch {
-    return HOME;
+/** The project bare follow-ups refer to; null when none / the slug was deleted. */
+export function getFocus(store: Store, chatId: number): string | null {
+  const slug = store.kvGet(focusKey(chatId));
+  if (!slug) return null;
+  if (!store.projectExists(slug)) {
+    store.kvSet(focusKey(chatId), ''); // self-heal a deleted project
+    return null;
   }
-  // Self-heal: a project room whose slug was deleted falls back to home.
-  if (parsed.kind === 'project') {
-    if (!parsed.slug || !store.projectExists(parsed.slug)) return HOME;
-    return parsed;
-  }
-  return parsed.kind === 'devops' ? parsed : HOME;
+  return slug;
 }
 
-export function setRoom(store: Store, chatId: number, room: Room): void {
-  store.kvSet(roomKey(chatId), JSON.stringify(room));
+export function setFocus(store: Store, chatId: number, slug: string): void {
+  store.kvSet(focusKey(chatId), slug);
 }
 
-export function roomLabel(room: Room): string {
-  switch (room.kind) {
-    case 'home': return '🏠 Home';
-    case 'devops': return '🛠 Server';
-    case 'project': return `📦 ${room.slug}`;
-  }
+export function clearFocus(store: Store, chatId: number): void {
+  store.kvSet(focusKey(chatId), '');
 }
+
 
 /** Persistent reply keyboard — the always-visible "which room am I in" anchor. */
 export function roomKeyboard(): ReturnType<Keyboard['persistent']> {
@@ -68,7 +59,7 @@ export function detectRoomSwitch(
   slugs: string[],
 ): Room | 'projects' | null {
   const t = text.trim();
-  if (HOME_RE.test(t)) return HOME;
+  if (HOME_RE.test(t)) return { kind: 'home' };
   if (DEVOPS_RE.test(t)) return { kind: 'devops' };
   if (PROJECTS_RE.test(t)) return 'projects';
 

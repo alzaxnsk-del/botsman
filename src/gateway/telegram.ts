@@ -3,14 +3,14 @@ import { InputFile } from 'grammy';
 import type Dockerode from 'dockerode';
 import fs from 'node:fs';
 import { logger } from '../logger.js';
-import { detectIntent } from '../intent.js';
+import { detectIntent, looksLikeCreate } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, type FixId } from '../doctor.js';
 import { updateConfigFile } from '../config.js';
-import { getRoom, setRoom, roomLabel, roomKeyboard, detectRoomSwitch, type Room } from './rooms.js';
+import { getFocus, setFocus, clearFocus, roomKeyboard, detectRoomSwitch, type Room } from './rooms.js';
 import {
-  routeDevOps, runReadOp, runMutatingOp, routeProjectMessage, missingSlugPrompt,
-  type DevOpsOp, type DevOpsDeps,
+  routeMessage, runReadOp, runMutatingOp, looksOperational, looksLikeQuestion, missingSlugPrompt,
+  type DevOpsOp, type DevOpsDeps, type Route,
 } from './devops.js';
 import type { StructuredLlm } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
@@ -99,10 +99,13 @@ export class TelegramGateway {
           '',
           "In a few minutes you'll get a link and a screenshot. Iterate in this same chat.",
           '',
-          'Rooms (buttons below the message box):',
-          '🏠 Home — create & change services',
-          '🛠 Server — ask about the server in plain language (load, disk, restarts, updates)',
-          '📦 Projects — enter a project to keep developing or ask questions about it',
+          'Just talk — I figure out what you mean:',
+          '• "make a TODO app" → builds a new service',
+          '• "add a dark theme" → changes the one you\'re working on',
+          '• "how is this built?" → answers without deploying',
+          '• "show the load" / "restart todo" / "update the server" → server ops (with confirmation)',
+          '',
+          'The buttons below are shortcuts: 🏠 reset · 🛠 server help · 📦 focus a project.',
           '',
           'Commands:',
           '/list — all projects',
@@ -278,6 +281,12 @@ export class TelegramGateway {
           ).catch(() => {});
           return;
         }
+        // A host-level op may only run once its first confirm set `confirmed`.
+        // This blocks a crafted/replayed `devops:exec2` from skipping the gate.
+        if (entry.op.hostLevel && !entry.confirmed) {
+          await ctx.answerCallbackQuery({ text: 'Tap Execute first.' });
+          return;
+        }
         this.pendingDevOps.delete(chatId);
         await ctx.answerCallbackQuery({ text: 'Working…' });
         await this.bot.api.editMessageText(chatId, entry.messageId, `⏳ ${entry.op.humanSummary}…`).catch(() => {});
@@ -300,7 +309,7 @@ export class TelegramGateway {
       }
     });
 
-    // Room switch commands (same logic as the persistent keyboard buttons).
+    // Focus shortcuts (same logic as the persistent keyboard buttons).
     this.bot.command('home', (ctx) => this.switchRoom(ctx, { kind: 'home' }));
     this.bot.command('server', (ctx) => this.switchRoom(ctx, { kind: 'devops' }));
     this.bot.command('projects', (ctx) => this.showProjectPicker(ctx));
@@ -322,109 +331,156 @@ export class TelegramGateway {
         return;
       }
 
-      // Room switching wins over everything: instant, deterministic.
+      // A focus shortcut (keyboard button / NL "go to X") wins — instant, free.
       const slugs = this.store.listProjects().map((p) => p.slug);
       const switchTo = detectRoomSwitch(text, slugs);
       if (switchTo === 'projects') return void this.showProjectPicker(ctx);
-      if (switchTo) return void this.switchRoom(ctx, switchTo);
+      if (switchTo?.kind === 'project') return void this.switchRoom(ctx, switchTo);
+      if (switchTo?.kind === 'home') return void this.switchRoom(ctx, switchTo);
+      if (switchTo?.kind === 'devops') return void this.switchRoom(ctx, switchTo);
 
-      const room = getRoom(this.store, chatId);
-      if (room.kind === 'devops') return this.handleDevOps(ctx, text);
-      if (room.kind === 'project') return this.handleProjectMessage(ctx, room.slug, text);
-      return this.handleHome(ctx, text);
+      return this.handleMessage(ctx, text);
     });
 
     this.bot.catch((err) => logger.error('telegram handler error', { error: String(err.error) }));
   }
 
-  // --- room handlers ---
+  // --- soft-context routing ---
 
+  /** A keyboard button / NL switch. Sets the focused project (or clears it). */
   private async switchRoom(ctx: Context, room: Room): Promise<void> {
-    setRoom(this.store, ctx.chat!.id, room);
-    const hint =
-      room.kind === 'devops'
-        ? 'Ask me about the server: "show load", "clean up disk", "restart <project>", "update the server".'
-        : room.kind === 'project'
-          ? `Develop ${room.slug} in chat: make changes ("add a dark theme") or ask questions ("how is this built?").`
-          : 'Describe a new service, or switch to 🛠 Server / 📦 Projects anytime.';
-    await ctx.reply(`You're now in ${roomLabel(room)}.\n${hint}`, { reply_markup: roomKeyboard() });
+    const chatId = ctx.chat!.id;
+    if (room.kind === 'project') {
+      setFocus(this.store, chatId, room.slug);
+      await ctx.reply(
+        `📦 Focused on *${room.slug}*. Change it ("add a dark theme"), ask about it ("how is this built?"), or just say what's new.`,
+        { parse_mode: 'Markdown', reply_markup: roomKeyboard() },
+      );
+      return;
+    }
+    clearFocus(this.store, chatId);
+    const hint = room.kind === 'devops'
+      ? 'Ask about the server in plain language: "show load", "clean up disk", "restart <project>", "update the server".'
+      : 'Tell me what to build or change, ask about the server, or open a project — all in plain language.';
+    await ctx.reply(hint, { reply_markup: roomKeyboard() });
   }
 
   private async showProjectPicker(ctx: Context): Promise<void> {
     const projects = this.store.listProjects();
     if (!projects.length) {
-      await ctx.reply('No projects yet. Switch to 🏠 Home and describe one.', { reply_markup: roomKeyboard() });
+      await ctx.reply('No projects yet. Describe one and I will build it.', { reply_markup: roomKeyboard() });
       return;
     }
     const kb = new InlineKeyboard();
     for (const p of projects) kb.text(`📦 ${p.slug}`, `room:project:${p.slug}`).row();
-    await ctx.reply('Pick a project to work on:', { reply_markup: kb });
+    await ctx.reply('Pick a project to focus on:', { reply_markup: kb });
   }
 
-  /** Home room: today's create/edit heuristic, unchanged. */
-  private async handleHome(ctx: Context, text: string): Promise<void> {
+  /**
+   * Unified content-based routing (soft context). A message is classified by
+   * what it SAYS, not which room you're "in":
+   *  - deterministic fast-path (no LLM): clear create / focused edit;
+   *  - LLM tail (one call) only for the ambiguous/operational/question remainder.
+   * Confirmation policy for ops is re-derived from OP_META, never the model.
+   */
+  private async handleMessage(ctx: Context, text: string): Promise<void> {
     const chatId = ctx.chat!.id;
-    const intent = detectIntent(
-      text,
-      this.store.listProjects().map((p) => p.slug),
-      this.store.kvGet(`last_active:${chatId}`),
-    );
-    if (intent.kind === 'ambiguous') {
-      const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
-      if (intent.lastSlug && this.store.projectExists(intent.lastSlug)) {
-        kb.text(`✏️ Edit ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
-      }
-      const sent = await ctx.reply('Is this a new service or a change to an existing one?', { reply_markup: kb });
-      this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text });
-      return;
-    }
-    if (intent.kind === 'create') await this.runTask('create', undefined, intent.description, ctx);
-    else await this.runTask('edit', intent.slug, intent.instruction, ctx);
-  }
-
-  /** DevOps room: route to an op; read ops run now, mutations confirm first. */
-  private async handleDevOps(ctx: Context, text: string): Promise<void> {
-    if (!this.structuredLlm) {
-      await ctx.reply('The DevOps assistant needs an LLM, which is unavailable. Use /doctor and /logs meanwhile.');
+    if (!text) {
+      await ctx.reply('Tell me what to build or change — or ask about a project or the server.');
       return;
     }
     const slugs = this.store.listProjects().map((p) => p.slug);
-    const thinking = await ctx.reply('🛠 …');
-    const op = await routeDevOps(this.structuredLlm, text, slugs);
-    if (!op) {
-      await this.bot.api.editMessageText(
-        ctx.chat!.id, thinking.message_id,
-        "I didn't catch a server action. Try: show load · containers · logs <project> · doctor <project> · " +
-        'restart <project> · redeploy <project> · rollback <project> · restart proxy · clean disk · update botsman · update host.',
-      ).catch(() => {});
-      return;
+    const focused = getFocus(this.store, chatId) ?? this.store.kvGet(`last_active:${chatId}`);
+
+    // No-LLM fast-path. Only HIGH-confidence, SAFE shortcuts here — anything
+    // brittle goes to the LLM router (which gates ops behind a confirm), because
+    // the false-negative cost is an auto-deployed wrong action:
+    //  - create: a brand-new project, harmless to fast-path;
+    //  - edit: only a real edit (not operational, not a question, not
+    //    create-phrased like "make me a shop"), targeting the focused/mentioned
+    //    project. Operational/question/create-phrased messages fall through.
+    if (!looksOperational(text) && !looksLikeQuestion(text)) {
+      const intent = detectIntent(text, slugs, focused);
+      if (intent.kind === 'create') return void this.runTask('create', undefined, intent.description, ctx);
+      if (intent.kind === 'edit' && !looksLikeCreate(text)) {
+        return void this.runTask('edit', intent.slug, intent.instruction, ctx);
+      }
+      // ambiguous or create-phrased → fall through to the LLM tail
     }
-    const need = missingSlugPrompt(op);
-    if (need) {
-      await this.bot.api.editMessageText(ctx.chat!.id, thinking.message_id, need).catch(() => {});
-      return;
-    }
-    if (!op.mutating) {
-      const result = await runReadOp(op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
-      await this.editMdSafe(ctx.chat!.id, thinking.message_id, result);
-      return;
-    }
-    // Mutation → confirm button (host-level ops get a second confirm later).
-    const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
-    await this.bot.api.editMessageText(ctx.chat!.id, thinking.message_id, `${op.humanSummary}?`, { reply_markup: kb }).catch(() => {});
-    this.pendingDevOps.set(ctx.chat!.id, { messageId: thinking.message_id, op, confirmed: false });
+
+    if (!this.structuredLlm) return this.fallbackNoLlm(ctx, text, focused);
+
+    const thinking = await ctx.reply('💭 …');
+    const route = await routeMessage(this.structuredLlm, text, slugs, focused);
+    await this.dispatchRoute(ctx, route, text, focused, thinking.message_id);
   }
 
-  /** Project room: edit (deploy) or question (read-only answer). */
-  private async handleProjectMessage(ctx: Context, slug: string, text: string): Promise<void> {
-    const route = await routeProjectMessage(this.structuredLlm, text);
-    if (route.kind === 'edit') {
-      await this.runTask('edit', slug, route.instruction, ctx);
+  private async dispatchRoute(
+    ctx: Context, route: Route, text: string, focused: string | null, thinkingId: number,
+  ): Promise<void> {
+    const chatId = ctx.chat!.id;
+    switch (route.kind) {
+      case 'create':
+        await this.deleteMessage(chatId, thinkingId);
+        return void this.runTask('create', undefined, route.description, ctx);
+      case 'edit':
+        await this.deleteMessage(chatId, thinkingId);
+        return void this.runTask('edit', route.slug, route.instruction, ctx);
+      case 'question': {
+        await this.bot.api.editMessageText(chatId, thinkingId, '🤔 Looking into it…').catch(() => {});
+        const res = await this.orchestrator.askProject(route.slug, route.question);
+        return void this.editMdSafe(chatId, thinkingId, res.answer || 'No answer.');
+      }
+      case 'devops': {
+        const op = route.op;
+        const need = missingSlugPrompt(op);
+        if (need) return void this.bot.api.editMessageText(chatId, thinkingId, need).catch(() => {});
+        if (!op.mutating) {
+          const result = await runReadOp(op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
+          return void this.editMdSafe(chatId, thinkingId, result);
+        }
+        const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
+        await this.bot.api.editMessageText(chatId, thinkingId, `${op.humanSummary}?`, { reply_markup: kb }).catch(() => {});
+        this.pendingDevOps.set(chatId, { messageId: thinkingId, op, confirmed: false });
+        return;
+      }
+      case 'none': {
+        // Couldn't classify: bias the clarification by what the text looked like.
+        if (looksOperational(text)) {
+          await this.bot.api.editMessageText(
+            chatId, thinkingId,
+            "I didn't catch a server action. Try: show load · containers · logs <project> · doctor <project> · " +
+            'restart <project> · redeploy <project> · rollback <project> · restart proxy · clean disk · update botsman · update host.',
+          ).catch(() => {});
+          return;
+        }
+        const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
+        if (focused && this.store.projectExists(focused)) kb.text(`✏️ Edit ${focused}`, `intent:edit:${focused}`);
+        await this.bot.api.editMessageText(chatId, thinkingId, 'Is this a new service or a change to an existing one?', { reply_markup: kb }).catch(() => {});
+        this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text });
+        return;
+      }
+    }
+  }
+
+  /** No LLM configured: deterministic best effort using detectIntent. */
+  private async fallbackNoLlm(ctx: Context, text: string, focused: string | null): Promise<void> {
+    const chatId = ctx.chat!.id;
+    if (looksOperational(text)) {
+      await ctx.reply('Server actions need an LLM, which is unavailable right now. Use /doctor <slug>, /logs <slug>, /rollback <slug> meanwhile.');
       return;
     }
-    const thinking = await ctx.reply('🤔 Looking into it…');
-    const res = await this.orchestrator.askProject(slug, route.question);
-    await this.editMdSafe(ctx.chat!.id, thinking.message_id, res.answer || 'No answer.');
+    const intent = detectIntent(text, this.store.listProjects().map((p) => p.slug), focused);
+    if (intent.kind === 'create') return void this.runTask('create', undefined, intent.description, ctx);
+    if (intent.kind === 'edit') return void this.runTask('edit', intent.slug, intent.instruction, ctx);
+    const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
+    if (intent.lastSlug && this.store.projectExists(intent.lastSlug)) kb.text(`✏️ Edit ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
+    const sent = await ctx.reply('Is this a new service or a change to an existing one?', { reply_markup: kb });
+    this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text });
+  }
+
+  private async deleteMessage(chatId: number, messageId: number): Promise<void> {
+    await this.bot.api.deleteMessage(chatId, messageId).catch(() => {});
   }
 
   /** Run a long task with a live-updating status message + 30s heartbeat. */
