@@ -4,6 +4,7 @@ import { logger } from '../logger.js';
 import { updateConfigFile, missingSetup, isValidDomain } from '../config.js';
 import { checkAnthropicKey, checkClaudeOauthToken } from '../preflight.js';
 import { isCloudflareIp, serverPublicIp } from '../doctor.js';
+import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
 import type { Store } from '../db.js';
 import type { BotsmanConfig } from '../types.js';
 
@@ -101,6 +102,16 @@ export class OnboardingBot {
           await this.finalize(ctx);
           break;
         }
+        default:
+          if (data.startsWith('model:')) {
+            const id = data.slice('model:'.length);
+            if (!isModelId(id)) break;
+            const prev = this.config();
+            updateConfigFile({ agent: { ...prev.agent, model: id } });
+            await ctx.reply(`✓ ${modelLabel(id)} will write your code.`);
+            await this.advance(ctx);
+          }
+          break;
       }
     });
 
@@ -180,7 +191,7 @@ export class OnboardingBot {
     updateConfigFile({ claudeCodeOauthToken: token, anthropicApiKey: undefined });
     this.expecting = null;
     await this.edit(ctx, probeMsg.message_id, '✓ Token works — usage counts against your subscription limits. Your message with the token has been deleted.');
-    await this.advance(ctx);
+    await this.askModel(ctx);
   }
 
   private async handleApiKey(ctx: Context, raw: string): Promise<void> {
@@ -195,7 +206,20 @@ export class OnboardingBot {
     updateConfigFile({ anthropicApiKey: key, claudeCodeOauthToken: undefined });
     this.expecting = null;
     await this.edit(ctx, probeMsg.message_id, '✓ Key works. Your message with the key has been deleted.');
-    await this.advance(ctx);
+    await this.askModel(ctx);
+  }
+
+  /** Part of the "coding agent" step: pick the model that writes the code. */
+  private async askModel(ctx: Context): Promise<void> {
+    this.expecting = null;
+    const kb = new InlineKeyboard();
+    for (const m of MODEL_CHOICES) kb.text(m.label, `model:${m.id}`).row();
+    await ctx.reply(
+      '*Which model should write your code?*\n\n' +
+      MODEL_CHOICES.map((m) => `${m.label} — ${m.blurb}`).join('\n') +
+      '\n\n_Recommended: 🏆 Opus for the best results. Change it anytime with /setup._',
+      { parse_mode: 'Markdown', reply_markup: kb },
+    );
   }
 
   private async tryDomain(ctx: Context, domain: string): Promise<void> {

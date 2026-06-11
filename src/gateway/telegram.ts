@@ -9,6 +9,7 @@ import { detectIntent, looksLikeCreate } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, type FixId } from '../doctor.js';
 import { updateConfigFile } from '../config.js';
+import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
 import { getFocus, setFocus, clearFocus, roomKeyboard, detectRoomSwitch, type Room } from './rooms.js';
 import {
   routeMessage, runReadOp, runMutatingOp, looksOperational, looksLikeQuestion, missingSlugPrompt,
@@ -63,6 +64,15 @@ export class TelegramGateway {
   ) {
     this.bot = new Bot(token);
     this.wire();
+  }
+
+  /** Current coding-agent model from config (for the /setup label). */
+  private currentModel(): string | undefined {
+    try {
+      return updateConfigFile({}).agent?.model;
+    } catch {
+      return undefined;
+    }
   }
 
   private devopsDeps(): DevOpsDeps {
@@ -205,8 +215,9 @@ export class TelegramGateway {
         .text('🔑 Coding agent auth', 'setup:auth')
         .text('🌐 Domain', 'setup:domain')
         .row()
+        .text('🧠 Model', 'setup:model')
         .text('📊 Toggle telemetry', 'setup:telemetry');
-      await ctx.reply('What do you want to change? I will restart and ask for the new value here.', {
+      await ctx.reply(`What do you want to change? Current model: ${modelLabel(this.currentModel())}.`, {
         reply_markup: kb,
       });
     });
@@ -225,6 +236,29 @@ export class TelegramGateway {
       const data = ctx.callbackQuery.data;
       const chatId = ctx.chat?.id;
       if (!chatId) return void ctx.answerCallbackQuery();
+
+      // Model picker: choose, then save+restart (handled in setupmodel: below).
+      if (data === 'setup:model') {
+        await ctx.answerCallbackQuery();
+        const kb = new InlineKeyboard();
+        for (const m of MODEL_CHOICES) kb.text(m.label, `setupmodel:${m.id}`).row();
+        await ctx.reply(
+          'Pick the model that writes your code:\n' + MODEL_CHOICES.map((m) => `${m.label} — ${m.blurb}`).join('\n'),
+          { reply_markup: kb },
+        );
+        return;
+      }
+      if (data.startsWith('setupmodel:')) {
+        await ctx.answerCallbackQuery();
+        const id = data.slice('setupmodel:'.length);
+        if (!isModelId(id)) return;
+        const cfg = updateConfigFile({});
+        updateConfigFile({ agent: { ...cfg.agent, model: id } });
+        await ctx.reply(`Switching to ${modelLabel(id)} — restarting to apply (~10s)…`);
+        logger.info('setup model change, restarting', { model: id });
+        setTimeout(() => process.exit(0), 1500);
+        return;
+      }
 
       if (data.startsWith('setup:')) {
         await ctx.answerCallbackQuery();
