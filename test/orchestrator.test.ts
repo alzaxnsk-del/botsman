@@ -181,6 +181,23 @@ describe('Orchestrator pipeline', () => {
     expect(fs.existsSync(paths.bareRepo(created.slug))).toBe(false);
   });
 
+  it('redeploy of the already-live commit is a no-op (git push without changes)', async () => {
+    const agent = fakeAgent(({ projectDir }) => {
+      fs.writeFileSync(path.join(projectDir, 'server.js'), 'v1');
+    });
+    const engine = fakeEngine();
+    const orch = makeOrch(agent, engine);
+    const created = await orch.enqueue('create', 'сделай сервис приветствий', () => {});
+    expect(created.ok).toBe(true);
+    expect(engine.deploys).toHaveLength(1);
+
+    // bare == working tree (user pushed without new commits)
+    const o = await orch.enqueue('redeploy', 'git push', () => {}, created.slug);
+    expect(o.ok).toBe(true);
+    expect(o.summary).toContain('up to date');
+    expect(engine.deploys).toHaveLength(1); // no second deploy
+  });
+
   it('serializes tasks: second waits for the first', async () => {
     const order: string[] = [];
     const agent: CodingAgent = {

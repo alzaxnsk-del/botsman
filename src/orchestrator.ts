@@ -275,6 +275,11 @@ export class Orchestrator {
     try {
       const commit = await syncFromBare(slug);
       if (!commit) throw new Error('Could not read the pushed commit from the bare repository.');
+      // A push with no new commits (or a re-push of the deployed commit) is a no-op.
+      if (commit === project.currentCommit && await this.deployEngine.containerRunning(slug)) {
+        this.store.finishTask(task.id, 'done', 'already up to date');
+        return { ok: true, slug, url: `https://${project.domain}/`, summary: 'Already up to date — the pushed commit is live.' };
+      }
       const deployed = await this.deployCommit(project, commit, report);
       this.store.finishTask(task.id, deployed.ok ? 'done' : 'failed', undefined, deployed.error);
       return deployed.ok
