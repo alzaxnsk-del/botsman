@@ -39,20 +39,19 @@ export function validateConfig(raw: unknown): BotsmanConfig {
   if (!ownerIds.length || !ownerIds.every((v) => Number.isInteger(v) && (v as number) > 0)) {
     problems.push('ownerIds: expected non-empty array of positive Telegram user IDs');
   }
-  const apiKey = typeof c.anthropicApiKey === 'string' ? c.anthropicApiKey : undefined;
-  const oauthToken = typeof c.claudeCodeOauthToken === 'string' ? c.claudeCodeOauthToken : undefined;
-  if (!apiKey && !oauthToken) {
-    problems.push(
-      'agent auth: set anthropicApiKey (sk-ant-api…) or claudeCodeOauthToken (sk-ant-oat…, from `claude setup-token`)',
-    );
-  }
+  // Auth and domain are OPTIONAL here: the console bootstrap saves only the
+  // bot token + owner ID, the rest arrives via in-chat onboarding. Formats
+  // are still validated when the fields are present.
+  const apiKey = typeof c.anthropicApiKey === 'string' && c.anthropicApiKey ? c.anthropicApiKey : undefined;
+  const oauthToken = typeof c.claudeCodeOauthToken === 'string' && c.claudeCodeOauthToken ? c.claudeCodeOauthToken : undefined;
   if (apiKey && apiKey.length < 20) {
     problems.push('anthropicApiKey: expected an Anthropic API key (sk-ant-...)');
   }
   if (oauthToken && !/^sk-ant-oat/.test(oauthToken)) {
     problems.push('claudeCodeOauthToken: expected a token from `claude setup-token` (sk-ant-oat…)');
   }
-  if (typeof c.baseDomain !== 'string' || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(c.baseDomain)) {
+  const baseDomain = typeof c.baseDomain === 'string' && c.baseDomain ? c.baseDomain : undefined;
+  if (baseDomain && !isValidDomain(baseDomain)) {
     problems.push('baseDomain: expected a domain like "apps.example.com"');
   }
   if (problems.length) {
@@ -65,7 +64,7 @@ export function validateConfig(raw: unknown): BotsmanConfig {
     ownerIds: ownerIds as number[],
     anthropicApiKey: apiKey,
     claudeCodeOauthToken: oauthToken,
-    baseDomain: (c.baseDomain as string).toLowerCase(),
+    baseDomain: baseDomain?.toLowerCase(),
     telemetry: {
       enabled: telemetryRaw.enabled === true, // strictly opt-in, default OFF
       endpoint: typeof telemetryRaw.endpoint === 'string' ? telemetryRaw.endpoint : undefined,
@@ -81,9 +80,42 @@ export function validateConfig(raw: unknown): BotsmanConfig {
   };
 }
 
+export function isValidDomain(s: string): boolean {
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s);
+}
+
+/** Which onboarding pieces are still missing (asked for in the Telegram chat). */
+export function missingSetup(config: BotsmanConfig): Array<'auth' | 'domain'> {
+  const missing: Array<'auth' | 'domain'> = [];
+  if (!config.anthropicApiKey && !config.claudeCodeOauthToken) missing.push('auth');
+  if (!config.baseDomain) missing.push('domain');
+  return missing;
+}
+
 export function saveConfig(config: BotsmanConfig): void {
   const file = paths.configFile();
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   fs.chmodSync(file, 0o600); // enforce even if file pre-existed
+}
+
+/**
+ * Merge a patch into config.json on disk (used by in-chat onboarding: each
+ * completed step persists immediately, so the config file IS the wizard
+ * state — a restart resumes at the first missing field).
+ */
+export function updateConfigFile(patch: Record<string, unknown>): BotsmanConfig {
+  const file = paths.configFile();
+  let raw: Record<string, unknown> = {};
+  try {
+    raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch { /* start from scratch */ }
+  const merged = { ...raw, ...patch };
+  // undefined values mean "remove the field" (e.g. /setup clearing auth).
+  for (const key of Object.keys(merged)) {
+    if (merged[key] === undefined) delete merged[key];
+  }
+  const validated = validateConfig(merged);
+  saveConfig(validated);
+  return validated;
 }

@@ -105,13 +105,13 @@ info "takes several minutes on the first run — good moment for a coffee ☕"
 docker compose build --quiet
 ok "image built"
 
-step 6 "Setup wizard"
+step 6 "Setup — two questions, the rest happens in Telegram"
 if [ -f "$BOTSMAN_HOME/config.json" ]; then
   ok "existing config found — skipping (re-run anytime: docker compose run --rm --no-deps botsman setup)"
 else
   # curl|bash: stdin is taken by the pipe, the wizard needs a terminal.
   if ! docker compose run --rm --no-deps botsman setup </dev/tty; then
-    fail "Setup wizard did not finish. Fix the inputs and run it again:
+    fail "Setup did not finish. Fix the inputs and run it again:
     cd $BOTSMAN_DIR && docker compose run --rm --no-deps botsman setup && docker compose up -d"
   fi
 fi
@@ -135,11 +135,9 @@ divider
 say ""
 say "  ${G}${B}✓ Botsman is running!${X}"
 say ""
-say "    ${B}Next steps${X}"
-say "    1. Open Telegram and send your bot:  ${B}/start${X}"
-say "    2. Describe your first service, for example:"
-say "       ${D}\"make a TODO service with a task list\"${X}"
+say "    ${B}Next:${X} open Telegram and send your bot ${B}/start${X}"
+say "    It will finish the setup right in the chat (coding agent, domain) —"
+say "    and then build your first service from a plain description."
 say ""
-say "    ${D}Make sure the wildcard DNS record exists: *.<your-domain> → this server.${X}"
 say "    ${D}Docs: https://github.com/alzaxnsk-del/botsman${X}"
 say ""

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateConfig, ConfigError } from '../src/config.js';
+import { validateConfig, missingSetup, ConfigError } from '../src/config.js';
 
 const valid = {
   telegramBotToken: '123456789:AAFakeTokenForTestsOnly_1234567890abc',
@@ -32,9 +32,23 @@ describe('validateConfig', () => {
     expect(c.anthropicApiKey).toBeUndefined();
   });
 
-  it('requires at least one auth method', () => {
-    const { anthropicApiKey, ...rest } = valid;
-    expect(() => validateConfig(rest)).toThrow(/agent auth/);
+  it('accepts a bootstrap config (token + owner only) — onboarding fills the rest', () => {
+    const c = validateConfig({
+      telegramBotToken: valid.telegramBotToken,
+      ownerIds: valid.ownerIds,
+    });
+    expect(missingSetup(c)).toEqual(['auth', 'domain']);
+  });
+
+  it('missingSetup is empty for a complete config', () => {
+    expect(missingSetup(validateConfig(valid))).toEqual([]);
+  });
+
+  it('missingSetup reports only the absent piece', () => {
+    const { anthropicApiKey, ...noAuth } = valid;
+    expect(missingSetup(validateConfig(noAuth))).toEqual(['auth']);
+    const { baseDomain, ...noDomain } = valid;
+    expect(missingSetup(validateConfig(noDomain))).toEqual(['domain']);
   });
 
   it('rejects a malformed subscription token', () => {
