@@ -106,6 +106,21 @@ export class HostExec {
     return this.runOnHost(script, { label: 'self_update', timeoutMs: 8 * 60_000 });
   }
 
+  /** Pull the helper image if it isn't on the host — createContainer won't. */
+  private async ensureImage(): Promise<void> {
+    try {
+      await this.docker.getImage(this.image).inspect();
+      return; // already present
+    } catch { /* needs pulling */ }
+    logger.info('hostExec pulling image', { image: this.image });
+    await new Promise<void>((resolve, reject) => {
+      this.docker.pull(this.image, (err: Error | null, stream: NodeJS.ReadableStream) => {
+        if (err || !stream) return reject(err ?? new Error('no pull stream'));
+        this.docker.modem.followProgress(stream, (e: Error | null) => (e ? reject(e) : resolve()));
+      });
+    });
+  }
+
   private spawn(
     createOpts: Dockerode.ContainerCreateOptions,
     timeoutMs: number,
@@ -113,6 +128,7 @@ export class HostExec {
     return (async () => {
       let container: Dockerode.Container | null = null;
       try {
+        await this.ensureImage(); // createContainer does NOT auto-pull
         container = await this.docker.createContainer(createOpts);
         const attach = await container.attach({ stream: true, stdout: true, stderr: true });
         const outChunks: Buffer[] = [];
