@@ -116,8 +116,16 @@ async function main(): Promise<void> {
     hostProjectsDir,
     maxTurns: config.agent?.maxTurns,
     timeoutMs: config.agent?.timeoutMs,
-    // Quality matters most for chat-to-deploy → Opus unless the owner picked otherwise.
-    model: config.agent?.model ?? DEFAULT_MODEL,
+    // Quality matters most for chat-to-deploy → Opus unless the owner picked
+    // otherwise. Resolved per run (not baked in) so changing the model in
+    // /setup applies on the next task without restarting the daemon.
+    model: () => {
+      try {
+        return loadConfig().agent?.model ?? DEFAULT_MODEL;
+      } catch {
+        return DEFAULT_MODEL;
+      }
+    },
     port: SERVICE_PORT,
     // Placeholder var names for the system prompt; real values are injected per-project.
     dbEnv: dbEnvFor({ dbName: 'app_<slug>', dbUser: 'u_<slug>', dbPassword: '<runtime>' }),
@@ -147,7 +155,7 @@ async function main(): Promise<void> {
     suggestName,
   );
 
-  const reconcileNotes = await orchestrator.reconcileOnStartup(docker);
+  const reconcile = await orchestrator.reconcileOnStartup(docker);
 
   // Conversational rooms: a structured LLM (DevOps + project routers) and the
   // privileged host-exec helper. structuredLlm uses the same auth as the namer.
@@ -166,8 +174,13 @@ async function main(): Promise<void> {
   if (pre.warnings.length) {
     await gateway.notifyOwner('⚠️ Botsman started with warnings:\n- ' + pre.warnings.join('\n- '));
   }
-  if (reconcileNotes.length) {
-    await gateway.notifyOwner('ℹ️ Cleaned up state after a restart:\n- ' + reconcileNotes.join('\n- '));
+  if (reconcile.notes.length) {
+    await gateway.notifyOwner('ℹ️ Cleaned up state after a restart:\n- ' + reconcile.notes.join('\n- '));
+  }
+  // Offer to resume any create the restart interrupted, from its original
+  // request — so an interrupted build never just silently vanishes.
+  if (reconcile.resumable.length) {
+    await gateway.offerResume(reconcile.resumable);
   }
   // First start after in-chat onboarding — tell the owner we are ready to work.
   if (store.kvGet(READY_NOTIFY_KEY)) {

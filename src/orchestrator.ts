@@ -94,6 +94,7 @@ export class Orchestrator {
   private async execute(item: QueueItem): Promise<TaskOutcome> {
     switch (item.kind) {
       case 'create': return this.createProject(item.instruction, item.report);
+      case 'resume': return this.resumeCreate(item.slug!, item.report);
       case 'edit': return this.editProject(item.slug!, item.instruction, item.report);
       case 'rollback': return this.rollbackProject(item.slug!, item.report);
       case 'delete': return this.deleteProject(item.slug!);
@@ -107,8 +108,6 @@ export class Orchestrator {
     const suggested = this.suggestName ? await this.suggestName(description).catch(() => null) : null;
     const base = suggested ?? slugFromDescription(description);
     const slug = uniqueSlug(base, (s) => this.store.projectExists(s));
-    const task = this.store.createTask(slug, 'create', description);
-    report('accepted', slug);
 
     const { dbName, dbUser } = dbNamesForSlug(slug);
     const project = this.store.createProject({
@@ -121,6 +120,32 @@ export class Orchestrator {
       currentCommit: null, currentImage: null, prevCommit: null, prevImage: null,
       dbName, dbUser, dbPassword: generatePassword(),
     });
+    return this.buildNewProject(project, description, report);
+  }
+
+  /**
+   * Resume a create that a daemon restart interrupted. The project row, repo and
+   * database already exist; we rebuild from the ORIGINAL description stored on
+   * the project — so the agent gets the real request, not whatever the user
+   * happened to type after the restart (which is how the original intent got
+   * lost and a wrong app got built).
+   */
+  async resumeCreate(slug: string, report: StageReporter): Promise<TaskOutcome> {
+    const project = this.store.getProject(slug);
+    if (!project) return { ok: false, slug, error: `Project ${slug} not found.` };
+    return this.buildNewProject(project, project.description, report);
+  }
+
+  /** The create build pipeline, shared by a fresh create and a resumed one. */
+  private async buildNewProject(
+    project: ProjectMeta,
+    description: string,
+    report: StageReporter,
+  ): Promise<TaskOutcome> {
+    const slug = project.slug;
+    const task = this.store.createTask(slug, 'create', description);
+    this.store.setStatus(slug, 'creating');
+    report('accepted', slug);
 
     try {
       await initProjectRepo(slug);
@@ -132,7 +157,7 @@ export class Orchestrator {
       if (!gen.ok) {
         this.store.setStatus(slug, 'failed');
         this.store.finishTask(task.id, 'failed', undefined, gen.error);
-        return { ok: false, slug, error: gen.error };
+        return { ok: false, slug, error: gen.error, costUsd: gen.costUsd };
       }
 
       report('committing');
@@ -142,6 +167,18 @@ export class Orchestrator {
         this.store.setStatus(slug, 'failed');
         this.store.finishTask(task.id, 'failed', undefined, err);
         return { ok: false, slug, error: err, costUsd: gen.costUsd };
+      }
+      // The agent reported success but left only the seeded .gitignore/CLAUDE.md
+      // — it produced no application files at all. commitAll still returns a
+      // commit (the seeds are new), so the "no files" check above can't catch
+      // this. Fail with a clear message instead of deploying an empty project.
+      if (!agentProducedAppFiles(slug)) {
+        const err =
+          'The agent finished without creating any application files. ' +
+          'Try rephrasing the request with a bit more detail about what to build.';
+        this.store.setStatus(slug, 'failed');
+        this.store.finishTask(task.id, 'failed', gen.summary, err);
+        return { ok: false, slug, error: err, summary: gen.summary, costUsd: gen.costUsd };
       }
       await ensureBareRepo(slug, this.controlUrl, this.controlToken);
       await syncToBare(slug);
@@ -380,21 +417,34 @@ export class Orchestrator {
    * refresh post-receive hooks (control token may have rotated) and remove
    * orphaned agent containers. Returns human-readable notes for the owner.
    */
-  async reconcileOnStartup(docker: Dockerode): Promise<string[]> {
+  async reconcileOnStartup(
+    docker: Dockerode,
+  ): Promise<{ notes: string[]; resumable: Array<{ slug: string; instruction: string }> }> {
     const notes: string[] = [];
     const interrupted = this.store.failInterruptedTasks();
-    if (interrupted > 0) {
-      notes.push(`tasks interrupted by the restart: ${interrupted}`);
+    if (interrupted.length > 0) {
+      notes.push(`tasks interrupted by the restart: ${interrupted.length}`);
     }
     for (const p of this.store.listProjects()) {
       if (p.status === 'creating' || p.status === 'building' || p.status === 'deploying') {
         const next = p.currentImage ? 'live' : 'failed';
         this.store.setStatus(p.slug, next);
-        notes.push(`${p.slug}: status ${p.status} → ${next}`);
+        // Don't claim "live" if the container isn't actually up — surface it so
+        // the owner can /doctor it instead of trusting a stale promotion.
+        const running = next === 'live'
+          ? await this.deployEngine.containerRunning(p.slug).catch(() => false)
+          : false;
+        const suffix = next === 'live' && !running ? ' (container down — run /doctor)' : '';
+        notes.push(`${p.slug}: status ${p.status} → ${next}${suffix}`);
       }
       await ensureBareRepo(p.slug, this.controlUrl, this.controlToken).catch((e) =>
         logger.warn('hook refresh failed', { slug: p.slug, error: String(e) }));
     }
+    // An interrupted CREATE whose project row still exists can be resumed from
+    // its original instruction — the caller offers the owner a one-tap resume.
+    const resumable = interrupted
+      .filter((t) => t.kind === 'create' && !!this.store.getProject(t.projectSlug))
+      .map((t) => ({ slug: t.projectSlug, instruction: t.instruction }));
     try {
       const orphans = await docker.listContainers({ all: true, filters: { label: [AGENT_LABEL] } });
       for (const c of orphans) {
@@ -404,7 +454,7 @@ export class Orchestrator {
     } catch (e) {
       logger.warn('agent container cleanup failed', { error: String(e) });
     }
-    return notes;
+    return { notes, resumable };
   }
 
   // --- queries used by the gateway ---
@@ -459,6 +509,22 @@ export class Orchestrator {
 export const MEMORY_FILE = 'CLAUDE.md';
 const MEMORY_MAX_LINES = 300;
 const MEMORY_MAX_BYTES = 16 * 1024;
+
+/**
+ * Did the agent produce any application files, or just the seeds the
+ * orchestrator wrote before it ran (.gitignore, CLAUDE.md)? A tree that is
+ * exactly the seeds means the agent created nothing — deploying it would build
+ * an empty project. The narrower "no package.json/Dockerfile" case is caught
+ * later by the deploy engine with its own clear message.
+ */
+function agentProducedAppFiles(slug: string): boolean {
+  const seeds = new Set(['.git', '.gitignore', MEMORY_FILE]);
+  try {
+    return fs.readdirSync(paths.projectDir(slug)).some((name) => !seeds.has(name));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Seed the project's memory file so it exists from the very first agent run
