@@ -22,6 +22,22 @@ export function sanitizeSlugCandidate(raw: string): string | null {
   return isValidSlug(s) ? s : null;
 }
 
+/**
+ * Content-free names the model emits when the description had no real product
+ * in it (e.g. it was handed a meta-question like "where is the new project I
+ * asked for?" → "new-project-request"). These are useless as project names, so
+ * we reject them and let the caller fall back to the heuristic.
+ */
+const GENERIC_SLUGS = new Set([
+  'new-project', 'new-project-request', 'project', 'new-service', 'service',
+  'my-app', 'my-project', 'web-app', 'webapp', 'app', 'application',
+  'untitled', 'example', 'test', 'demo', 'new', 'request', 'website', 'site',
+]);
+
+export function isGenericSlug(slug: string): boolean {
+  return GENERIC_SLUGS.has(slug);
+}
+
 export async function suggestSlugLLM(
   apiKey: string,
   description: string,
@@ -48,7 +64,8 @@ export async function suggestSlugLLM(
     if (!res.ok) return null;
     const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
     const text = data.content?.find((c) => c.type === 'text')?.text ?? '';
-    return sanitizeSlugCandidate(text);
+    const slug = sanitizeSlugCandidate(text);
+    return slug && !isGenericSlug(slug) ? slug : null;
   } catch {
     return null;
   }
@@ -88,7 +105,8 @@ export async function suggestSlugCLI(oauthToken: string, description: string): P
     child.on('close', () => {
       clearTimeout(timer);
       const parsed = parseClaudeJson(out);
-      resolve(parsed && !parsed.is_error ? sanitizeSlugCandidate(parsed.result ?? '') : null);
+      const slug = parsed && !parsed.is_error ? sanitizeSlugCandidate(parsed.result ?? '') : null;
+      resolve(slug && !isGenericSlug(slug) ? slug : null);
     });
   });
 }

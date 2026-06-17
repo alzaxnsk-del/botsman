@@ -34,7 +34,7 @@ export interface ProjectMeta {
   updatedAt: string;
 }
 
-export type TaskKind = 'create' | 'edit' | 'rollback' | 'delete' | 'redeploy';
+export type TaskKind = 'create' | 'edit' | 'rollback' | 'delete' | 'redeploy' | 'resume';
 
 export type TaskStatus = 'queued' | 'running' | 'done' | 'failed';
 
