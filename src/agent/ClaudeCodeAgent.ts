@@ -21,7 +21,12 @@ export interface ClaudeCodeAgentOptions {
   maxTurns?: number;
   /** Hard wall-clock cap per task in ms (AC-F2). */
   timeoutMs?: number;
-  model?: string;
+  /**
+   * Coding-agent model alias. A function is resolved per run, so changing the
+   * model (in /setup) takes effect on the next task WITHOUT restarting the
+   * daemon — a restart mid-task is what used to kill in-flight builds.
+   */
+  model?: string | (() => string | undefined);
   /** Service internal port — used in the system prompt contract. */
   port: number;
   dbEnv: Record<string, string>;
@@ -72,7 +77,8 @@ export class ClaudeCodeAgent implements CodingAgent {
       // container boundary (only /work is mounted), not interactive prompts.
       '--dangerously-skip-permissions',
     ];
-    if (this.opts.model) args.push('--model', this.opts.model);
+    const model = typeof this.opts.model === 'function' ? this.opts.model() : this.opts.model;
+    if (model) args.push('--model', model);
 
     // Claude Code refuses --dangerously-skip-permissions under root (its own
     // safety check). Root-only VPS installs run the daemon as uid 0, so the

@@ -64,15 +64,19 @@ describe('Store tasks & kv', () => {
     expect(store.kvGet('x')).toBe('2');
   });
 
-  it('failInterruptedTasks marks queued/running tasks as failed (restart reconciliation)', () => {
+  it('failInterruptedTasks marks queued/running tasks as failed and returns them (restart reconciliation)', () => {
     store.createProject(sampleProject());
     store.createTask('todo', 'create', 'first');
     const t2 = store.createTask('todo', 'edit', 'second');
     store.finishTask(t2.id, 'done', 'ok');
-    expect(store.failInterruptedTasks()).toBe(1);
+    const failed = store.failInterruptedTasks();
+    expect(failed).toHaveLength(1);
+    // The returned rows carry the original instruction so the create can be resumed.
+    expect(failed[0].instruction).toBe('first');
+    expect(failed[0].kind).toBe('create');
     const tasks = store.tasksForProject('todo');
     expect(tasks.find((t) => t.instruction === 'first')?.status).toBe('failed');
     expect(tasks.find((t) => t.instruction === 'second')?.status).toBe('done');
-    expect(store.failInterruptedTasks()).toBe(0);
+    expect(store.failInterruptedTasks()).toHaveLength(0);
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type Dockerode from 'dockerode';
 import { Orchestrator } from '../src/orchestrator.js';
 import { Store } from '../src/db.js';
 import { paths } from '../src/paths.js';
@@ -268,5 +269,71 @@ describe('Orchestrator pipeline', () => {
       'start:сделай сервис один', 'end:сделай сервис один',
       'start:сделай сервис два', 'end:сделай сервис два',
     ]);
+  });
+
+  it('create fails clearly when the agent produces no application files', async () => {
+    // The agent "ran" (ok) but wrote nothing — only the seeded .gitignore/CLAUDE.md
+    // remain, which is what slipped past the old "no files" guard.
+    const agent = fakeAgent(() => { /* writes nothing */ }, 'thought about it');
+    const engine = fakeEngine();
+    const orch = makeOrch(agent, engine);
+
+    const o = await orch.enqueue('create', 'сделай мне что-нибудь', () => {});
+    expect(o.ok).toBe(false);
+    expect(o.error).toContain('without creating any application files');
+    expect(engine.deploys).toHaveLength(0);
+    expect(store.getProject(o.slug)?.status).toBe('failed');
+  });
+
+  it('resumeCreate rebuilds an interrupted create from the original request', async () => {
+    let seenInstruction = '';
+    const agent: CodingAgent = {
+      run: async (input) => {
+        seenInstruction = input.instruction;
+        fs.writeFileSync(path.join(input.projectDir, 'package.json'), '{"name":"x"}');
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), 'const p = process.env.PORT;');
+        return { ok: true, summary: 'rebuilt', durationMs: 1 };
+      },
+    };
+    const engine = fakeEngine();
+    const orch = makeOrch(agent, engine);
+
+    // The half-made project an interrupted create leaves behind: the row exists
+    // (status failed) and holds the ORIGINAL description.
+    store.createProject({
+      slug: 'hello-world', name: 'hello-world',
+      description: 'сделай страничку hello world в стиле тинейджера', status: 'failed',
+      domain: 'hello-world.apps.test', internalPort: 3000,
+      currentCommit: null, currentImage: null, prevCommit: null, prevImage: null,
+      dbName: 'app_hello_world', dbUser: 'u_hello_world', dbPassword: 'pw',
+    });
+
+    const o = await orch.enqueue('resume', '', () => {}, 'hello-world');
+    expect(o.ok).toBe(true);
+    expect(o.slug).toBe('hello-world');
+    // The agent saw the ORIGINAL request, not an empty/substituted instruction.
+    expect(seenInstruction).toContain('hello world в стиле тинейджера');
+    expect(store.getProject('hello-world')!.status).toBe('live');
+    expect(engine.deploys).toHaveLength(1);
+  });
+
+  it('reconcileOnStartup fails interrupted tasks and surfaces resumable creates', async () => {
+    const orch = makeOrch(fakeAgent(() => {}), fakeEngine());
+    // A create caught mid-flight: project row exists, its task is still queued.
+    store.createProject({
+      slug: 'hello-world', name: 'hello-world', description: 'teen hello world',
+      status: 'creating', domain: 'hello-world.apps.test', internalPort: 3000,
+      currentCommit: null, currentImage: null, prevCommit: null, prevImage: null,
+      dbName: 'app', dbUser: 'u', dbPassword: 'p',
+    });
+    store.createTask('hello-world', 'create', 'teen hello world');
+
+    const docker = { listContainers: async () => [] } as unknown as Dockerode;
+    const { notes, resumable } = await orch.reconcileOnStartup(docker);
+
+    expect(notes.some((n) => n.includes('tasks interrupted by the restart: 1'))).toBe(true);
+    expect(resumable).toEqual([{ slug: 'hello-world', instruction: 'teen hello world' }]);
+    expect(store.tasksForProject('hello-world')[0].status).toBe('failed');
+    expect(store.getProject('hello-world')!.status).toBe('failed'); // no image → failed
   });
 });

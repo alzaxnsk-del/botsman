@@ -164,13 +164,21 @@ export class Store {
     this.db.prepare('UPDATE tasks SET status=? WHERE id=?').run(status, id);
   }
 
-  /** Startup reconciliation: tasks interrupted by a daemon restart must not look in-flight forever. */
-  failInterruptedTasks(): number {
-    const info = this.db.prepare(`
+  /**
+   * Startup reconciliation: tasks interrupted by a daemon restart must not look
+   * in-flight forever. Returns the rows it failed (with their stored
+   * instruction) so the caller can offer to resume them — a restart in the
+   * middle of a build must not silently drop the user's request.
+   */
+  failInterruptedTasks(): TaskRecord[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM tasks WHERE status IN ('queued', 'running')`,
+    ).all() as TaskRow[];
+    this.db.prepare(`
       UPDATE tasks SET status='failed', error='Interrupted by a daemon restart', finished_at=?
       WHERE status IN ('queued', 'running')
     `).run(new Date().toISOString());
-    return info.changes;
+    return rows.map(rowToTask);
   }
 
   tasksForProject(slug: string, limit = 20): TaskRecord[] {

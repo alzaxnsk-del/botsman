@@ -236,6 +236,14 @@ export class DockerDeployEngine implements DeployEngine {
 
   private async buildImage(dir: string, tag: string): Promise<void> {
     if (!fs.existsSync(path.join(dir, 'Dockerfile'))) {
+      // The default Dockerfile does `COPY package*.json ./` — without one, the
+      // build fails with an opaque "COPY failed: no source files were
+      // specified". Fail early with a message that says what's actually wrong.
+      if (!fs.existsSync(path.join(dir, 'package.json'))) {
+        throw new Error(
+          'no application source: the project has neither a Dockerfile nor a package.json to build from.',
+        );
+      }
       fs.writeFileSync(path.join(dir, 'Dockerfile'), DEFAULT_DOCKERFILE);
     }
     const tarStream = pack(dir, {

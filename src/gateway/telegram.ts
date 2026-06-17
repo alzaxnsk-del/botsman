@@ -254,10 +254,13 @@ export class TelegramGateway {
         if (!isModelId(id)) return;
         const cfg = updateConfigFile({});
         updateConfigFile({ agent: { ...cfg.agent, model: id } });
-        await ctx.reply(`Switching to ${modelLabel(id)} — restarting to apply (~10s)…`);
-        this.store.kvSet(RESTART_NOTICE_KEY, `✓ Back online — now using ${modelLabel(id)}.`);
-        logger.info('setup model change, restarting', { model: id });
-        setTimeout(() => process.exit(0), 1500);
+        // The agent reads the model per run, so the change applies to the NEXT
+        // task with NO restart — a restart here used to kill an in-flight build.
+        const busy = this.orchestrator.queueLength > 0
+          ? ' The current task finishes on the previous model; this applies to your next request.'
+          : '';
+        await ctx.reply(`✓ Now using ${modelLabel(id)} — no restart needed.${busy}`);
+        logger.info('model changed', { model: id });
         return;
       }
 
@@ -286,7 +289,7 @@ export class TelegramGateway {
           return;
         }
         logger.info('setup change requested, restarting', { what });
-        setTimeout(() => process.exit(0), 1500);
+        this.restartWhenIdle();
         return;
       }
 
@@ -314,6 +317,29 @@ export class TelegramGateway {
         const slug = data.slice('room:project:'.length);
         if (!this.store.projectExists(slug)) return void ctx.reply('That project no longer exists.');
         await this.switchRoom(ctx, { kind: 'project', slug });
+        return;
+      }
+
+      // Resume / discard a create that a restart interrupted (offered at startup).
+      if (data.startsWith('resume:')) {
+        await ctx.answerCallbackQuery();
+        const slug = data.slice('resume:'.length);
+        const msgId = ctx.callbackQuery.message?.message_id;
+        if (!this.store.projectExists(slug)) {
+          if (msgId) await this.bot.api.editMessageText(chatId, msgId, 'That request is no longer available.').catch(() => {});
+          return;
+        }
+        if (msgId) await this.deleteMessage(chatId, msgId);
+        return void this.runTask('resume', slug, '', ctx);
+      }
+      if (data.startsWith('discard:')) {
+        await ctx.answerCallbackQuery({ text: 'Discarded' });
+        const slug = data.slice('discard:'.length);
+        const msgId = ctx.callbackQuery.message?.message_id;
+        if (this.store.projectExists(slug)) {
+          await this.orchestrator.enqueue('delete', '', () => {}, slug);
+        }
+        if (msgId) await this.bot.api.editMessageText(chatId, msgId, '🗑 Discarded the interrupted request.').catch(() => {});
         return;
       }
 
@@ -588,9 +614,49 @@ export class TelegramGateway {
     await this.bot.api.deleteMessage(chatId, messageId).catch(() => {});
   }
 
+  /**
+   * Restart the daemon — but never on top of a running task. A model/setup
+   * change that hard-exits mid-build is exactly what dropped an in-flight
+   * create before; here we let the "restarting…" reply flush, then wait
+   * (bounded) for the orchestrator queue to drain before exiting.
+   */
+  private restartWhenIdle(): void {
+    void (async () => {
+      await sleep(1500); // flush the "restarting…" reply (matches the old delay)
+      if (this.orchestrator.queueLength > 0) {
+        await this.notifyOwner('⏳ Waiting for the running task to finish before restarting…').catch(() => {});
+        const deadline = Date.now() + 15 * 60_000; // never wait forever
+        while (this.orchestrator.queueLength > 0 && Date.now() < deadline) {
+          await sleep(2_000);
+        }
+      }
+      process.exit(0);
+    })();
+  }
+
+  /**
+   * After a restart, offer to resume any create that was interrupted mid-build.
+   * Resuming rebuilds from the project's ORIGINAL request, so the intent isn't
+   * lost (and isn't replaced by whatever the user typed next).
+   */
+  async offerResume(creates: Array<{ slug: string; instruction: string }>): Promise<void> {
+    for (const c of creates) {
+      const kb = new InlineKeyboard()
+        .text('▶️ Resume', `resume:${c.slug}`)
+        .text('🗑 Discard', `discard:${c.slug}`);
+      const text =
+        '⏸️ This request was interrupted by a restart and never finished:\n\n' +
+        `"${c.instruction.slice(0, 500)}"\n\n` +
+        "Resume it (I'll rebuild from your original request), or discard?";
+      for (const id of this.ownerIds) {
+        await this.bot.api.sendMessage(id, text, { reply_markup: kb }).catch(() => {});
+      }
+    }
+  }
+
   /** Run a long task with a live-updating status message + 30s heartbeat. */
   private async runTask(
-    kind: 'create' | 'edit' | 'rollback',
+    kind: 'create' | 'resume' | 'edit' | 'rollback',
     slug: string | undefined,
     instruction: string,
     ctx: Context,
