@@ -34,6 +34,23 @@ export function clearFocus(store: Store, chatId: number): void {
   store.kvSet(focusKey(chatId), '');
 }
 
+// Sticky server/admin context: like project focus but for the 🛠 Server room.
+// While set, bare messages lean toward server ops and the keyboard shows admin
+// actions. Mutually exclusive with project focus (switchRoom coordinates both).
+const roomKey = (chatId: number): string => `room:${chatId}`;
+
+export function inServerRoom(store: Store, chatId: number): boolean {
+  return store.kvGet(roomKey(chatId)) === 'devops';
+}
+
+export function setServerRoom(store: Store, chatId: number): void {
+  store.kvSet(roomKey(chatId), 'devops');
+}
+
+export function clearServerRoom(store: Store, chatId: number): void {
+  store.kvSet(roomKey(chatId), '');
+}
+
 
 /** Persistent reply keyboard — the always-visible "which room am I in" anchor. */
 export function roomKeyboard(): ReturnType<Keyboard['persistent']> {
@@ -41,6 +58,78 @@ export function roomKeyboard(): ReturnType<Keyboard['persistent']> {
     .text('🏠 Home').text('🛠 Server').text('📦 Projects')
     .resized()
     .persistent();
+}
+
+/**
+ * While connected to a project the global rooms are swapped for actions ON that
+ * project: 🚪 Exit returns to Home; the rest (Review/Doctor/Logs) are safe,
+ * read-only one-taps so the keyboard can't trigger an accidental destructive op.
+ */
+export function projectKeyboard(): ReturnType<Keyboard['persistent']> {
+  return new Keyboard()
+    .text('🚪 Exit').text('🔍 Review').text('💻 Claude Code')
+    .row()
+    .text('📋 Logs').text('↩️ Rollback')
+    .resized()
+    .persistent();
+}
+
+export type ProjectAction = 'exit' | 'review' | 'logs' | 'rollback' | 'code';
+
+// Exact button labels (+ a few unambiguous typed synonyms), anchored so a
+// multi-word edit that merely mentions "review"/"logs" is NOT hijacked. Kept
+// deliberately narrow: overloaded bare words ("leave", "обзор", "log", "журнал")
+// are excluded so a one-word feature request isn't mistaken for a tap.
+const EXIT_RE = /^(🚪\s*)?(exit|выйти|выход)$/i;
+const REVIEW_RE = /^(🔍\s*)?(review|ревью)$/i;
+const PLOGS_RE = /^(📋\s*)?(logs|логи)$/i;
+const ROLLBACK_RE = /^(↩️\s*)?(rollback|откат|откатить)$/i;
+const CODE_RE = /^(💻\s*)?(claude\s*code|clone|клонировать|local\s*dev|локально)$/i;
+
+/** Map a project-context keyboard tap to its action, or null. */
+export function detectProjectAction(text: string): ProjectAction | null {
+  const t = text.trim();
+  if (EXIT_RE.test(t)) return 'exit';
+  if (REVIEW_RE.test(t)) return 'review';
+  if (PLOGS_RE.test(t)) return 'logs';
+  if (ROLLBACK_RE.test(t)) return 'rollback';
+  if (CODE_RE.test(t)) return 'code';
+  return null;
+}
+
+/**
+ * Server/admin-context keyboard: the global rooms are swapped for the common
+ * server actions. 🚪 Exit (shared with the project keyboard, detected by
+ * detectProjectAction) returns Home; read-only actions run instantly; the
+ * mutating ones (Clean disk / Restart proxy / Update) go through a confirm.
+ */
+export function serverKeyboard(): ReturnType<Keyboard['persistent']> {
+  return new Keyboard()
+    .text('🚪 Exit').text('📊 Load').text('🐳 Containers')
+    .row()
+    .text('🧹 Clean disk').text('🔁 Restart proxy').text('⬆️ Update')
+    .resized()
+    .persistent();
+}
+
+export type ServerAction = 'load' | 'containers' | 'clean-disk' | 'restart-proxy' | 'update';
+
+const SRV_LOAD_RE = /^(📊\s*)?(load|нагрузка|metrics|метрики)$/i;
+const SRV_CONTAINERS_RE = /^(🐳\s*)?(containers|контейнеры)$/i;
+const SRV_PRUNE_RE = /^(🧹\s*)?(clean\s*disk|cleanup|prune|очистить\s*диск|очистка\s*диска)$/i;
+const SRV_PROXY_RE = /^(🔁\s*)?(restart\s*proxy|перезапустить\s*прокси)$/i;
+const SRV_UPDATE_RE = /^(⬆️\s*)?(update|обновить|обновление)$/i;
+
+/** Map a server-context keyboard tap to its action, or null. Exit is handled by
+ *  detectProjectAction (the 🚪 Exit label is shared). */
+export function detectServerAction(text: string): ServerAction | null {
+  const t = text.trim();
+  if (SRV_LOAD_RE.test(t)) return 'load';
+  if (SRV_CONTAINERS_RE.test(t)) return 'containers';
+  if (SRV_PRUNE_RE.test(t)) return 'clean-disk';
+  if (SRV_PROXY_RE.test(t)) return 'restart-proxy';
+  if (SRV_UPDATE_RE.test(t)) return 'update';
+  return null;
 }
 
 const HOME_RE = /^(🏠\s*)?(home|\/home|домой|на\s*главную)$/i;

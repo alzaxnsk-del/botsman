@@ -59,6 +59,19 @@ describe('routeMessage', () => {
     expect(r).toEqual({ kind: 'create', description: 'build me a shop' });
   });
 
+  it('passes a server/admin-context hint to the model only when serverContext is set', async () => {
+    let captured = '';
+    const capturing: StructuredLlm = (async (opts) => {
+      captured = opts.user;
+      return opts.validate({ kind: 'devops', op: 'host_metrics' });
+    }) as StructuredLlm;
+    await routeMessage(capturing, 'show load', [], null, true);
+    expect(captured).toContain('SERVER/admin context');
+    captured = '';
+    await routeMessage(capturing, 'show load', [], null);
+    expect(captured).not.toContain('SERVER/admin context');
+  });
+
   it('routes edit, resolving the slug from focus when unnamed', async () => {
     const r = await routeMessage(stubLlm({ kind: 'edit', slug: '' }), 'make it dark', ['todo'], 'todo');
     expect(r).toEqual({ kind: 'edit', slug: 'todo', instruction: 'make it dark' });

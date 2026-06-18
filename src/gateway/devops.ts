@@ -182,10 +182,16 @@ export async function routeMessage(
   text: string,
   slugs: string[],
   focusedSlug: string | null,
+  serverContext = false,
 ): Promise<Route> {
+  // In the 🛠 Server room, bias the model toward devops ops: bare/ambiguous or
+  // operational messages are server actions there, not new projects.
+  const contextLine = serverContext
+    ? 'The user is in the SERVER/admin context: prefer a devops op for operational or ambiguous messages; choose create/edit/question ONLY if the message clearly describes building or changing an app.\n'
+    : '';
   const reply = await llm({
     system: ROUTER_SYSTEM,
-    user: `Projects: ${slugs.join(', ') || '(none)'}\nConnected project: ${focusedSlug ?? '(none)'}\nMessage: ${text}`,
+    user: `Projects: ${slugs.join(', ') || '(none)'}\nConnected project: ${focusedSlug ?? '(none)'}\n${contextLine}Message: ${text}`,
     validate: validateRouterReply,
   });
   if (!reply) return { kind: 'none' };
