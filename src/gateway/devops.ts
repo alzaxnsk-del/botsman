@@ -218,16 +218,28 @@ export async function routeMessage(
     case 'devops': {
       const op = reply.op as DevOpsOpId;
       if (!OP_IDS.includes(op)) return { kind: 'none' };
-      const meta = OP_META[op];
-      const slug = meta.needsSlug ? resolveSlug(reply.slug) : undefined;
-      return {
-        kind: 'devops',
-        op: { op, slug, mutating: meta.mutating, hostLevel: meta.hostLevel, humanSummary: summarize(op, slug) },
-      };
+      const slug = OP_META[op].needsSlug ? resolveSlug(reply.slug) : undefined;
+      return { kind: 'devops', op: opLiteral(op, slug) };
     }
     default:
       return { kind: 'none' };
   }
+}
+
+/**
+ * Build the exact DevOpsOp literal `routeMessage` produces, so menu-driven ops
+ * (e.g. the Home panel's "Update Botsman") behave identically to LLM-routed ones
+ * and re-derive their confirm policy from OP_META — never from the caller.
+ */
+export function opLiteral(op: DevOpsOpId, slug?: string): DevOpsOp {
+  const meta = OP_META[op];
+  return {
+    op,
+    slug: meta.needsSlug ? slug : undefined,
+    mutating: meta.mutating,
+    hostLevel: meta.hostLevel,
+    humanSummary: summarize(op, slug),
+  };
 }
 
 export function summarize(op: DevOpsOpId, slug?: string): string {

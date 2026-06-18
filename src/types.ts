@@ -8,6 +8,11 @@ export const RESTART_NOTICE_KEY = 'restart_notice';
  *  can /cancel an in-chat re-config and keep their previous settings. */
 export const SETUP_BACKUP_KEY = 'setup_backup';
 
+/** kv key: JSON array of the last startup's preflight warnings, so the Home
+ *  panel can show server-wide issues without re-probing. Rewritten every start
+ *  (empty array clears stale warnings). */
+export const PREFLIGHT_WARNINGS_KEY = 'preflight_warnings';
+
 export type ProjectStatus =
   | 'creating'
   | 'building'
