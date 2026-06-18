@@ -9,6 +9,14 @@
 
 Botsman runs on your VPS. You talk to it from Telegram (or push code from your laptop). A coding agent writes the service, Botsman containerizes it, gives it a subdomain with automatic TLS, runs a smoke check, and replies with a link and a screenshot. Want a change? Just say so in the chat. Your code, your server, your API key — nothing is resold or locked in.
 
+It comes down to three "ones":
+
+1. **One line** stands it up on your own VPS — `curl … | bash`.
+2. **One message** turns a description into a *live* service — code, database, subdomain, HTTPS, screenshot — at a real URL.
+3. **One command** pulls it into Claude Code on your laptop; a `git push` redeploys.
+
+Think **Replit's chat-to-app, but on your own server with your own key** — no token markup, nothing to lock you in. Or **local Claude Code without the production headache** — the domain, TLS, container and database are already wired up.
+
 ```
 You:      make a TODO service with a task list and a way to mark tasks done
 Botsman:  ✓ todo.yourdomain.com — deployed     [link]  [screenshot]
@@ -77,7 +85,7 @@ Under the hood:
 
 - **Your server, your code.** Everything runs on your VPS. Each project is a plain git repo on disk — clone it, edit it in any IDE, push to redeploy. Leaving Botsman is one `git clone` away (which is exactly why you won't need to).
 - **Bring your own key.** Botsman never proxies or resells LLM tokens. You plug in your own Claude subscription or API key, and pick the model. Your bill for intelligence stays yours and transparent.
-- **Phone and laptop are equal doors.** Sketch a service from Telegram on your commute, finish it by hand in your editor in the evening — same project, no migration.
+- **Phone and laptop are equal doors.** Sketch a service from Telegram on your commute, then pull it into Claude Code (or any editor) on your laptop in the evening and `git push` to ship — same project, no migration.
 - **Boring, predictable deploys.** One supported service stack, containerized, with health checks and one-command rollback. Magic where it helps, predictability where it matters.
 
 ---
