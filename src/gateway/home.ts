@@ -9,8 +9,6 @@ import type { LlmHealthSnapshot } from '../llm.js';
  */
 
 export interface HomeStatusInput {
-  /** The project we just disconnected from, if Home was reached by leaving one. */
-  disconnectedFrom?: string | null;
   /** Project counts (computed by the gateway via deployEngine.containerRunning). */
   projects: { live: number; down: number; total: number };
   /** LLM liveness snapshot, or null when no health signal is wired. */
@@ -23,9 +21,13 @@ export interface HomeStatusInput {
 
 /** Render the Home status section (plain text — slugs/errors aren't Markdown-safe). */
 export function homeStatusLines(input: HomeStatusInput): string[] {
-  const lines: string[] = ['🏠 Home — tap a button below to act.'];
-  if (input.disconnectedFrom) lines.push(`Disconnected from ${input.disconnectedFrom}.`);
-  lines.push('');
+  const lines: string[] = [
+    '🏠 Home',
+    '',
+    '💬 To build a new project, just describe it here — e.g. "make a TODO app with a task list".',
+    '💻 Already have one? Develop it on your computer with Claude Code — tap 💻 below.',
+    '',
+  ];
 
   if (input.projects.total === 0) {
     lines.push('📦 No projects yet — just describe one and I’ll build it.');
@@ -62,7 +64,9 @@ export function homeKeyboard(): InlineKeyboard {
     .text('📦 Projects', 'home:projects')
     .row()
     .text('⬆️ Update Botsman', 'home:update')
-    .text('🔧 Setup', 'home:setup');
+    .text('🔧 Setup', 'home:setup')
+    .row()
+    .text('💻 Code on your computer', 'home:clone');
 }
 
 /**

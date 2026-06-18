@@ -7,16 +7,21 @@ import { logger } from '../logger.js';
 import { paths } from '../paths.js';
 import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject } from '../intent.js';
 import { isValidSlug } from '../slug.js';
-import { runDoctor, type FixId } from '../doctor.js';
+import { runDoctor, serverPublicIp, type FixId } from '../doctor.js';
 import { updateConfigFile } from '../config.js';
 import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
-import { getFocus, setFocus, clearFocus, roomKeyboard, detectRoomSwitch, type Room } from './rooms.js';
+import {
+  getFocus, setFocus, clearFocus, roomKeyboard, projectKeyboard, serverKeyboard, detectRoomSwitch,
+  detectProjectAction, detectServerAction, inServerRoom, setServerRoom, clearServerRoom,
+  type Room, type ServerAction,
+} from './rooms.js';
 import {
   routeMessage, runReadOp, runMutatingOp, looksOperational, looksLikeQuestion, missingSlugPrompt,
   runDevOpsConfirm, opLiteral,
-  type DevOpsOp, type DevOpsDeps, type Route,
+  type DevOpsOp, type DevOpsOpId, type DevOpsDeps, type Route,
 } from './devops.js';
 import { homeStatusLines, homeKeyboard, degradedNoneMessage } from './home.js';
+import { localDevInstructions } from '../clone.js';
 import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
 import { MEMORY_FILE, type Orchestrator, type TaskOutcome } from '../orchestrator.js';
@@ -39,6 +44,23 @@ const STAGE_LABELS: Record<Stage, string> = {
 
 const HEARTBEAT_MS = 25_000; // never silent longer than 30s (§4 EPIC B)
 
+// Server-keyboard taps → the devops op they run. Read-only ops run instantly;
+// the mutating ones reuse the confirm flow (Update is host-level → 2 confirms).
+const SERVER_ACTION_OPS: Record<ServerAction, DevOpsOpId> = {
+  load: 'host_metrics',
+  containers: 'container_stats',
+  'clean-disk': 'prune_docker',
+  'restart-proxy': 'restart_proxy',
+  update: 'self_update',
+};
+
+// The 🔍 Review one-tap: a read-only senior-engineer pass over the connected
+// project. Runs via askProject ('ask' mode → read-only mount, never commits).
+const REVIEW_PROMPT =
+  'Act as a senior engineer reviewing THIS project (read-only — do NOT change any files). ' +
+  'Briefly cover: what it does, the architecture, the most likely bugs or security issues, ' +
+  'and 3–5 concrete, specific improvements. Keep it skimmable.';
+
 /**
  * Telegram Gateway (§2): long polling, owner whitelist, commands + free text.
  */
@@ -50,6 +72,8 @@ export class TelegramGateway {
   private pendingAmbiguous = new Map<number, { messageId: number; text: string }>();
   /** DevOps op awaiting a confirm button; messageId guards stale clicks. */
   private pendingDevOps = new Map<number, { messageId: number; op: DevOpsOp; confirmed: boolean }>();
+  /** Chats with a 🔍 Review agent run in flight — debounces repeated taps. */
+  private reviewing = new Set<number>();
 
   constructor(
     private token: string,
@@ -75,6 +99,14 @@ export class TelegramGateway {
     } catch {
       return undefined;
     }
+  }
+
+  /** The persistent keyboard that matches the chat's CURRENT context, so the
+   *  visible bar never lies about which room you're in. */
+  private replyKeyboardFor(chatId: number): ReturnType<typeof roomKeyboard> {
+    if (getFocus(this.store, chatId)) return projectKeyboard();
+    if (inServerRoom(this.store, chatId)) return serverKeyboard();
+    return roomKeyboard();
   }
 
   private devopsDeps(): DevOpsDeps {
@@ -120,7 +152,7 @@ export class TelegramGateway {
           '• "how is this built?" → answers without deploying',
           '• "show the load" / "restart todo" / "update the server" → server ops (with confirmation)',
           '',
-          'The buttons below are shortcuts: 🏠 reset · 🛠 server help · 📦 focus a project.',
+          'The buttons below change with where you are: 🏠 Home, inside a project, or the 🛠 Server room (each shows its own quick actions and 🚪 Exit).',
           '',
           'Commands:',
           '/list — all projects',
@@ -132,14 +164,14 @@ export class TelegramGateway {
           '/delete <slug> — delete a project',
           '/setup — change agent auth, domain or telemetry',
         ].join('\n'),
-        { reply_markup: roomKeyboard() },
+        { reply_markup: this.replyKeyboardFor(ctx.chat!.id) },
       ),
     );
 
     this.bot.command('list', async (ctx) => {
       const projects = this.store.listProjects();
       if (!projects.length) {
-        await ctx.reply('No projects yet. Describe a service — and I will build it.', { reply_markup: roomKeyboard() });
+        await ctx.reply('No projects yet. Describe a service — and I will build it.', { reply_markup: this.replyKeyboardFor(ctx.chat!.id) });
         return;
       }
       const lines = await Promise.all(
@@ -173,8 +205,7 @@ export class TelegramGateway {
       const slug = this.argSlug(ctx);
       if (!slug) return void ctx.reply('Usage: /logs <slug>');
       if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
-      const logs = await this.deployEngine.containerLogs(slug, 50).catch((e) => `Error: ${e.message}`);
-      await this.replyMdSafe(ctx, `Logs for ${slug} (last lines):\n\`\`\`\n${logs.slice(-3500) || '(empty)'}\n\`\`\``);
+      await this.sendLogs(ctx, slug);
     });
 
     // View the project's memory (CLAUDE.md) — what the agent persists across
@@ -365,7 +396,33 @@ export class TelegramGateway {
           this.pendingDevOps.set(chatId, { messageId: sent.message_id, op, confirmed: false });
           return;
         }
+        if (what === 'clone') {
+          await ctx.answerCallbackQuery();
+          const projects = this.store.listProjects();
+          if (!projects.length) {
+            await ctx.reply(
+              '💻 Once you have a project, you can clone it and develop it locally with Claude Code — a git push then auto-deploys. Describe a project here to create your first one.',
+            );
+            return;
+          }
+          const kb = new InlineKeyboard();
+          for (const p of projects) kb.text(`💻 ${p.slug}`, `clone:${p.slug}`).row();
+          await ctx.reply(
+            'Develop any project on your computer with Claude Code — pick one for its exact clone command:',
+            { reply_markup: kb },
+          );
+          return;
+        }
         await ctx.answerCallbackQuery();
+        return;
+      }
+
+      // "💻 <slug>" from the Home clone picker → that project's local-dev guide.
+      if (data.startsWith('clone:')) {
+        await ctx.answerCallbackQuery();
+        const slug = data.slice('clone:'.length);
+        if (!this.store.projectExists(slug)) return void ctx.reply('That project no longer exists.');
+        await this.sendLocalDevInfo(ctx, slug);
         return;
       }
 
@@ -429,7 +486,12 @@ export class TelegramGateway {
         this.pendingDelete.delete(chatId);
         if (/^(да|yes|y)\.?$/i.test(text)) {
           const outcome = await this.orchestrator.enqueue('delete', '', () => {}, pending);
-          await ctx.reply(outcome.ok ? `🗑 ${outcome.summary}` : `❌ ${outcome.error}`);
+          // If we just deleted the connected project, getFocus self-heals to
+          // null → restore the global bar so the keyboard matches reality.
+          await ctx.reply(
+            outcome.ok ? `🗑 ${outcome.summary}` : `❌ ${outcome.error}`,
+            outcome.ok ? { reply_markup: this.replyKeyboardFor(chatId) } : {},
+          );
         } else {
           await ctx.reply('Deletion cancelled.');
         }
@@ -444,6 +506,37 @@ export class TelegramGateway {
       if (switchTo?.kind === 'home') return void this.switchRoom(ctx, switchTo);
       if (switchTo?.kind === 'devops') return void this.switchRoom(ctx, switchTo);
 
+      // Project-context keyboard (🚪 Exit · 🔍 Review · 📋 Logs · ↩️ Rollback) —
+      // handled deterministically, no LLM, so it works even when the router is
+      // down. A multi-word edit that merely mentions "review"/"logs" won't match
+      // (anchored labels). Exit is handled even when focus is already gone (e.g.
+      // the connected project was just deleted) so a stale 🚪 Exit still returns
+      // Home and restores the global keyboard instead of becoming a bogus create.
+      const action = detectProjectAction(text);
+      if (action === 'exit') return void this.switchRoom(ctx, { kind: 'home' });
+      const connected = getFocus(this.store, chatId);
+      if (connected) {
+        if (action === 'review') return void this.reviewProject(ctx, connected);
+        if (action === 'logs') return void this.sendLogs(ctx, connected);
+        if (action === 'code') return void this.sendLocalDevInfo(ctx, connected);
+        if (action === 'rollback') {
+          // Mutating → reuse the devops confirm flow (single confirm; not
+          // host-level) so a stray keyboard tap can't roll back without asking.
+          const op = opLiteral('rollback_service', connected);
+          const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
+          const sent = await ctx.reply(`${op.humanSummary}?`, { reply_markup: kb });
+          this.pendingDevOps.set(chatId, { messageId: sent.message_id, op, confirmed: false });
+          return;
+        }
+      }
+
+      // Server/admin room: deterministic one-taps for the server keyboard
+      // (read-only run instantly; mutating ask first). Work even if the LLM is down.
+      if (inServerRoom(this.store, chatId)) {
+        const sa = detectServerAction(text);
+        if (sa) return void this.runServerAction(ctx, sa);
+      }
+
       return this.handleMessage(ctx, text);
     });
 
@@ -456,25 +549,41 @@ export class TelegramGateway {
   private async switchRoom(ctx: Context, room: Room): Promise<void> {
     const chatId = ctx.chat!.id;
     if (room.kind === 'project') {
+      clearServerRoom(this.store, chatId);
       setFocus(this.store, chatId, room.slug);
       await ctx.reply(
-        `🔗 *Connected to ${room.slug}.*\nEverything now goes here — changes ("add a dark theme") and questions ("how is this built?") — with no extra prompts, until you disconnect.\nTap 🏠 (below) to disconnect.`,
-        { parse_mode: 'Markdown', reply_markup: roomKeyboard() },
+        `🔗 *Connected to ${room.slug}.*\nEverything now goes here — changes ("add a dark theme") and questions ("how is this built?"), no extra prompts.\nQuick actions are on the keyboard below: 🔍 Review · 📋 Logs · ↩️ Rollback (asks first). Tap 🚪 Exit to disconnect.`,
+        { parse_mode: 'Markdown', reply_markup: projectKeyboard() },
       );
       return;
     }
-    const wasConnected = getFocus(this.store, chatId);
+    const wasProject = getFocus(this.store, chatId);
+    const wasServer = inServerRoom(this.store, chatId);
     clearFocus(this.store, chatId);
     if (room.kind === 'devops') {
+      // Sticky admin context: bare messages now lean toward server ops, and the
+      // keyboard shows admin actions, until 🚪 Exit. Dangerous ops ask first.
+      setServerRoom(this.store, chatId);
       await ctx.reply(
-        'Ask about the server in plain language: "show load", "clean up disk", "restart <project>", "update the server".',
-        { reply_markup: roomKeyboard() },
+        '🛠 *Server — admin mode.*\nJust say what you need: "show load", "restart todo", "clean disk", "update". Or tap a button below. I ask before anything risky.\nTap 🚪 Exit to leave.',
+        { parse_mode: 'Markdown', reply_markup: serverKeyboard() },
       );
       return;
     }
     // Home is a command-driven control panel (no AI), so it keeps working even
-    // when the LLM router is down — and surfaces problems + how to fix them.
-    return void this.showHome(ctx, wasConnected);
+    // when the LLM router is down. ALWAYS restore the global bar here: showHome's
+    // panel uses an inline keyboard, so only a message carrying roomKeyboard()
+    // can reset the persistent bar — including a STALE project/server bar left
+    // behind when the focused project vanished out-of-band (getFocus self-heals
+    // to null, so wasProject is falsy yet the old bar is still on screen).
+    clearServerRoom(this.store, chatId);
+    const note = wasProject
+      ? `🚪 Left ${wasProject} — back to Home.`
+      : wasServer
+        ? '🚪 Left the server — back to Home.'
+        : '🏠 Home — main menu.';
+    await ctx.reply(note, { reply_markup: roomKeyboard() });
+    return void this.showHome(ctx);
   }
 
   /**
@@ -482,7 +591,7 @@ export class TelegramGateway {
    * LLM calls. Status counts come from the DB + a cheap container probe; the AI
    * line reads the in-memory health snapshot; preflight warnings come from kv.
    */
-  private async showHome(ctx: Context, wasConnected?: string | null): Promise<void> {
+  private async showHome(ctx: Context): Promise<void> {
     const projects = this.store.listProjects();
     let live = 0;
     let down = 0;
@@ -499,7 +608,6 @@ export class TelegramGateway {
     } catch { /* ignore malformed kv */ }
 
     const lines = homeStatusLines({
-      disconnectedFrom: wasConnected ?? null,
       projects: { live, down, total: projects.length },
       llm: this.llmHealth?.snapshot() ?? null,
       llmConfigured: !!this.structuredLlm,
@@ -522,10 +630,19 @@ export class TelegramGateway {
   }
 
   private async showProjectPicker(ctx: Context): Promise<void> {
+    const chatId = ctx.chat!.id;
+    // Opening the picker navigates out of the server room — clear the sticky
+    // flag so admin bias can't leak, and (since the picker message can only
+    // carry its inline keyboard) restore the global bar in a short note.
+    const leavingServer = inServerRoom(this.store, chatId);
+    clearServerRoom(this.store, chatId);
     const projects = this.store.listProjects();
     if (!projects.length) {
-      await ctx.reply('No projects yet. Describe one and I will build it.', { reply_markup: roomKeyboard() });
+      await ctx.reply('No projects yet. Describe one and I will build it.', { reply_markup: this.replyKeyboardFor(chatId) });
       return;
+    }
+    if (leavingServer) {
+      await ctx.reply('📦 Projects', { reply_markup: roomKeyboard() });
     }
     const kb = new InlineKeyboard();
     for (const p of projects) kb.text(`🔗 ${p.slug}`, `room:project:${p.slug}`).row();
@@ -546,16 +663,18 @@ export class TelegramGateway {
       return;
     }
     const slugs = this.store.listProjects().map((p) => p.slug);
-    const focused = getFocus(this.store, chatId) ?? this.store.kvGet(`last_active:${chatId}`);
+    const inServer = inServerRoom(this.store, chatId);
+    // In the server room there is no "connected" project — don't let a stale
+    // last_active masquerade as one (it would auto-target a bare op or, worse,
+    // auto-apply a high-confidence edit with no confirm). Outside it, last_active
+    // still biases bare follow-ups as before.
+    const focused = getFocus(this.store, chatId) ?? (inServer ? null : this.store.kvGet(`last_active:${chatId}`));
 
-    // No-LLM fast-path. Only HIGH-confidence, SAFE shortcuts here — anything
-    // brittle goes to the LLM router (which gates ops behind a confirm), because
-    // the false-negative cost is an auto-deployed wrong action:
-    //  - create: a brand-new project, harmless to fast-path;
-    //  - edit: only a real edit (not operational, not a question, not
-    //    create-phrased like "make me a shop"), targeting the focused/mentioned
-    //    project. Operational/question/create-phrased messages fall through.
-    if (!looksOperational(text) && !looksLikeQuestion(text)) {
+    // No-LLM authoring fast-path. Only HIGH-confidence, SAFE shortcuts here —
+    // anything brittle goes to the LLM router (which gates ops behind a confirm).
+    // Skipped in the server room: there a bare message means a server op, not
+    // "build/change an app", so we let the router (with the admin hint) decide.
+    if (!inServer && !looksOperational(text) && !looksLikeQuestion(text)) {
       const intent = detectIntent(text, slugs, focused);
       if (intent.kind === 'create') return void this.createOrAsk(ctx, intent.description, slugs, null);
       if (intent.kind === 'edit' && !looksLikeCreate(text) && !looksLikeDelete(text)) {
@@ -564,10 +683,10 @@ export class TelegramGateway {
       // ambiguous, create- or delete-phrased → fall through to the LLM tail
     }
 
-    if (!this.structuredLlm) return this.fallbackNoLlm(ctx, text, focused);
+    if (!this.structuredLlm) return this.fallbackNoLlm(ctx, text, focused, inServer);
 
     const thinking = await ctx.reply('💭 …');
-    const route = await routeMessage(this.structuredLlm, text, slugs, focused);
+    const route = await routeMessage(this.structuredLlm, text, slugs, focused, inServer);
     await this.dispatchRoute(ctx, route, text, focused, thinking.message_id);
   }
 
@@ -679,8 +798,15 @@ export class TelegramGateway {
   }
 
   /** No LLM configured: deterministic best effort using detectIntent. */
-  private async fallbackNoLlm(ctx: Context, text: string, focused: string | null): Promise<void> {
+  private async fallbackNoLlm(ctx: Context, text: string, focused: string | null, inServer = false): Promise<void> {
     const chatId = ctx.chat!.id;
+    if (inServer) {
+      await ctx.reply(
+        'The AI is unavailable right now, but the server buttons below still work: ' +
+        '📊 Load · 🐳 Containers · 🧹 Clean disk · 🔁 Restart proxy · ⬆️ Update.',
+      );
+      return;
+    }
     if (looksOperational(text)) {
       await ctx.reply('Server actions need an LLM, which is unavailable right now. Use /doctor <slug>, /logs <slug>, /rollback <slug> meanwhile.');
       return;
@@ -696,6 +822,60 @@ export class TelegramGateway {
 
   private async deleteMessage(chatId: number, messageId: number): Promise<void> {
     await this.bot.api.deleteMessage(chatId, messageId).catch(() => {});
+  }
+
+  /** 🔍 Review one-tap: a read-only senior-engineer pass over the project.
+   *  Debounced per chat — askProject runs outside the task queue, so repeated
+   *  taps would otherwise pile up concurrent agent containers on the VPS. */
+  private async reviewProject(ctx: Context, slug: string): Promise<void> {
+    const chatId = ctx.chat!.id;
+    if (this.reviewing.has(chatId)) {
+      await ctx.reply('🔍 A review is already running — one moment.');
+      return;
+    }
+    this.reviewing.add(chatId);
+    const thinking = await ctx.reply(`🔍 Reviewing ${slug}… (read-only, no changes)`);
+    try {
+      const res = await this.orchestrator.askProject(slug, REVIEW_PROMPT);
+      const body = res.ok ? (res.answer || 'No findings.') : `❌ ${res.answer}`;
+      await this.editMdSafe(chatId, thinking.message_id, body);
+    } finally {
+      this.reviewing.delete(chatId);
+    }
+  }
+
+  /** 📋 Logs one-tap (and the /logs command): last container log lines. */
+  private async sendLogs(ctx: Context, slug: string): Promise<void> {
+    const logs = await this.deployEngine.containerLogs(slug, 50).catch((e) => `Error: ${(e as Error).message}`);
+    await this.replyMdSafe(ctx, `Logs for ${slug} (last lines):\n\`\`\`\n${logs.slice(-3500) || '(empty)'}\n\`\`\``);
+  }
+
+  /** 💻 Claude Code: how to clone this project and develop it locally. Fills in
+   *  the server IP + SSH user/path so the command is (almost) copy-paste. */
+  private async sendLocalDevInfo(ctx: Context, slug: string): Promise<void> {
+    const p = this.store.getProject(slug);
+    if (!p) return void ctx.reply(`Project ${slug} not found.`);
+    // Fall back to the standard install path (NOT paths.home(), which is the
+    // container's /data) so the command points at the host, not inside Docker.
+    const hostHome = process.env.BOTSMAN_HOST_DIR ?? '~/.botsman';
+    const host = (await serverPublicIp()) ?? '<server>';
+    await this.replyMdSafe(ctx, localDevInstructions({ slug, hostHome, host, domain: p.domain }));
+  }
+
+  /** A server-keyboard tap → its devops op. Read-only runs instantly; mutating
+   *  drops into the existing confirm flow (host-level Update → double confirm). */
+  private async runServerAction(ctx: Context, action: ServerAction): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const op = opLiteral(SERVER_ACTION_OPS[action]);
+    if (!op.mutating) {
+      const thinking = await ctx.reply(`⏳ ${op.humanSummary}…`);
+      const result = await runReadOp(op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
+      await this.editMdSafe(chatId, thinking.message_id, result);
+      return;
+    }
+    const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
+    const sent = await ctx.reply(`${op.humanSummary}?`, { reply_markup: kb });
+    this.pendingDevOps.set(chatId, { messageId: sent.message_id, op, confirmed: false });
   }
 
   /**
@@ -887,8 +1067,10 @@ export class TelegramGateway {
    *  "ready" message). `withKeyboard` surfaces the persistent room shortcuts —
    *  used on the first full-mode message so the buttons appear without /start. */
   async notifyOwner(text: string, withKeyboard = false): Promise<void> {
-    const opts = withKeyboard ? { reply_markup: roomKeyboard() } : {};
     for (const id of this.ownerIds) {
+      // Pick per recipient: a focus set before a restart persists in kv, so the
+      // "back online" notice must not clobber a connected user's project keyboard.
+      const opts = withKeyboard ? { reply_markup: this.replyKeyboardFor(id) } : {};
       await this.bot.api.sendMessage(id, text, opts).catch(() => {});
     }
   }
