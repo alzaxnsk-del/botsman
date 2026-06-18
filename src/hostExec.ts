@@ -99,11 +99,24 @@ export class HostExec {
    */
   async selfUpdate(repoDir: string): Promise<HostExecResult> {
     const safe = repoDir.replace(/'/g, '');
-    // Detach so the daemon's own restart doesn't kill the compose step midway.
+    // Robust update:
+    //  - `git fetch + reset --hard` tolerates a dirty / divergent / shallow
+    //    (`clone --depth 1`) checkout that `git pull --ff-only` would choke on;
+    //    safe.directory avoids git's "dubious ownership" refusal under host root.
+    //    (reset --hard only touches tracked files — the untracked .env is kept.)
+    //  - the BUILD runs in the FOREGROUND so a failure is reported to the owner
+    //    instead of vanishing into a backgrounded log; only the final `up -d`
+    //    (which recreates, and so kills, this daemon) is detached so it can
+    //    finish after the daemon goes down.
     const script =
-      `cd '${safe}' && git pull --ff-only && ` +
-      `nohup sh -c 'docker compose build && docker compose up -d' >/tmp/botsman-selfupdate.log 2>&1 &`;
-    return this.runOnHost(script, { label: 'self_update', timeoutMs: 8 * 60_000 });
+      `cd '${safe}' && ` +
+      `git config --global --add safe.directory '${safe}' && ` +
+      `git fetch origin main && git reset --hard FETCH_HEAD && ` +
+      `docker compose build && ` +
+      `(nohup docker compose up -d >/tmp/botsman-selfupdate.log 2>&1 &)`;
+    // Foreground build can take a few minutes on a small VPS (tsc + any changed
+    // layers); generous cap. Cached rebuilds (only src changed) are ~1 min.
+    return this.runOnHost(script, { label: 'self_update', timeoutMs: 12 * 60_000 });
   }
 
   /** Pull the helper image if it isn't on the host — createContainer won't. */

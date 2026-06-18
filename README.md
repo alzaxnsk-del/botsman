@@ -159,6 +159,7 @@ Outside a connection, routing is by content and anything ambiguous is confirmed 
 | `/rollback <project>` | Roll back to the previous working version |
 | `/delete <project>` | Stop and remove a project (asks for confirmation) |
 | `/setup` | Change agent auth, model, domain or telemetry |
+| `/version` | The running version and release date |
 
 ### Project memory
 
