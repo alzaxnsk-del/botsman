@@ -696,27 +696,36 @@ export class TelegramGateway {
   }
 
   /**
-   * Create a new project — but if the request names (even fuzzily) an EXISTING
-   * project, ask first: the user probably meant to change it, not clone it
-   * (e.g. «сделай ревью тамагочи» when tamagotchi-web-app already exists).
+   * Create a new project. The very first project is built straight away (nothing
+   * to confuse it with). Once projects EXIST, always confirm — a create-phrased
+   * message may really be about an existing project, and a silent build means an
+   * accidental duplicate. The closest-looking existing project is offered first
+   * (fuzzy/transliterated name match), then the rest, so "improve X" is one tap.
    * `thinkingId` is an existing "💭…" message to edit, or null to send fresh.
    */
   private async createOrAsk(ctx: Context, description: string, slugs: string[], thinkingId: number | null): Promise<void> {
     const chatId = ctx.chat!.id;
-    const similar = findSimilarProject(description, slugs);
-    if (!similar) {
+    if (slugs.length === 0) {
       if (thinkingId) await this.deleteMessage(chatId, thinkingId);
       return void this.runTask('create', undefined, description, ctx);
     }
-    const kb = new InlineKeyboard()
-      .text('🆕 New project', 'intent:new')
-      .text(`✏️ Change ${similar}`, `intent:edit:${similar}`);
-    const body = `This looks related to your existing *${similar}*.\nMake a NEW project, or change that one?`;
+    const similar = findSimilarProject(description, slugs);
+    const ordered = similar ? [similar, ...slugs.filter((s) => s !== similar)] : slugs;
+    const shown = ordered.slice(0, 6); // keep the keyboard sane for many projects
+    const kb = new InlineKeyboard().text('🆕 New project', 'intent:new').row();
+    for (const s of shown) kb.text(`✏️ ${s}`, `intent:edit:${s}`).row();
+    // Plain text (no Markdown): the description is arbitrary user text.
+    const desc = description.length > 80 ? description.slice(0, 79) + '…' : description;
+    const more = ordered.length > shown.length ? "\n(or type a project's name to change it)" : '';
+    const body =
+      `You have ${slugs.length} project${slugs.length === 1 ? '' : 's'}. ` +
+      `Make a NEW one for "${desc}", or improve an existing project?` +
+      (similar ? `\nThis looks related to ${similar}.` : '') + more;
     if (thinkingId) {
-      await this.bot.api.editMessageText(chatId, thinkingId, body, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
+      await this.bot.api.editMessageText(chatId, thinkingId, body, { reply_markup: kb }).catch(() => {});
       this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: description });
     } else {
-      const sent = await ctx.reply(body, { parse_mode: 'Markdown', reply_markup: kb });
+      const sent = await ctx.reply(body, { reply_markup: kb });
       this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text: description });
     }
   }
@@ -816,8 +825,11 @@ export class TelegramGateway {
       await ctx.reply('Server actions need an LLM, which is unavailable right now. Use /doctor <slug>, /logs <slug>, /rollback <slug> meanwhile.');
       return;
     }
-    const intent = detectIntent(text, this.store.listProjects().map((p) => p.slug), focused);
-    if (intent.kind === 'create') return void this.runTask('create', undefined, intent.description, ctx);
+    const slugs = this.store.listProjects().map((p) => p.slug);
+    const intent = detectIntent(text, slugs, focused);
+    // createOrAsk still confirms-or-creates correctly without the LLM (it's
+    // button-driven), so a new-project request gets the same guard here.
+    if (intent.kind === 'create') return void this.createOrAsk(ctx, intent.description, slugs, null);
     if (intent.kind === 'edit') return void this.runTask('edit', intent.slug, intent.instruction, ctx);
     const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
     if (intent.lastSlug && this.store.projectExists(intent.lastSlug)) kb.text(`✏️ Edit ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
@@ -976,6 +988,21 @@ export class TelegramGateway {
       clearInterval(heartbeat);
       await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome);
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
+      // A fresh build → connect to it, so the next message goes straight to the
+      // new project and the persistent bar becomes its actions (the outcome
+      // message is an editMessageText and can't carry a reply keyboard, so this
+      // connect note is what swaps the bar).
+      if (outcome.ok && outcome.slug && (kind === 'create' || kind === 'resume')) {
+        // Connecting and being in the Server room are mutually exclusive
+        // (switchRoom coordinates both) — clear the server flag too, or the bar
+        // would show the project while routing stayed biased to admin ops.
+        clearServerRoom(this.store, chatId);
+        setFocus(this.store, chatId, outcome.slug);
+        await ctx.reply(
+          `🔗 Connected to ${outcome.slug} — changes ("add a dark theme") and questions go straight to it now. Tap 🚪 Exit to disconnect.`,
+          { reply_markup: projectKeyboard() },
+        ).catch(() => {});
+      }
     } catch (e) {
       clearInterval(heartbeat);
       finished = true;
