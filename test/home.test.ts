@@ -41,11 +41,11 @@ describe('homeStatusLines', () => {
 });
 
 describe('homeKeyboard', () => {
-  it('has exactly the four home:* command buttons', () => {
+  it('has exactly the five home:* command buttons', () => {
     const buttons = homeKeyboard().inline_keyboard
       .flat()
       .map((b) => (b as { callback_data?: string }).callback_data);
-    expect(buttons).toEqual(['home:metrics', 'home:projects', 'home:update', 'home:setup']);
+    expect(buttons).toEqual(['home:metrics', 'home:projects', 'home:update', 'home:setup', 'home:clone']);
   });
 });
 

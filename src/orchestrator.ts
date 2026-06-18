@@ -10,6 +10,8 @@ import {
   ensureBareRepo, syncToBare, syncFromBare, syncFromBareIfAhead, log as gitLog,
 } from './git.js';
 import { AGENT_LABEL } from './agent/ClaudeCodeAgent.js';
+import { serverPublicIp } from './doctor.js';
+import { cloneUrl } from './clone.js';
 import { scanForSecrets } from './deploy/secretScan.js';
 import { dbNamesForSlug, generatePassword, dbEnvFor, type PostgresAdmin } from './deploy/postgres.js';
 import { SERVICE_PORT, type DeployEngine } from './deploy/engine.js';
@@ -489,9 +491,12 @@ export class Orchestrator {
     if (!p) return null;
     const running = await this.deployEngine.containerRunning(slug).catch(() => false);
     const history = await gitLog(slug, 5).catch(() => '(no history)');
-    // The repo path as seen on the HOST (we run in a container where it is /data/...).
-    const hostHome = process.env.BOTSMAN_HOST_DIR ?? paths.home();
-    const cloneUrl = `<user>@<server>:${hostHome}/repos/${slug}.git`;
+    // Fill in the SSH user + public IP so the clone command is (almost)
+    // copy-paste — same builder as the 💻 Claude Code flow. '~/.botsman' (NOT
+    // the container's /data) when the host path isn't set.
+    const hostHome = process.env.BOTSMAN_HOST_DIR ?? '~/.botsman';
+    const host = (await serverPublicIp()) ?? '<server>';
+    const clone = cloneUrl({ slug, hostHome, host });
     return [
       `*${p.slug}* — ${p.status}${p.status === 'live' && !running ? ' ⚠️ container is down' : ''}`,
       `URL: https://${p.domain}/`,
@@ -500,7 +505,7 @@ export class Orchestrator {
       '',
       'Recent commits:',
       '```', history, '```',
-      `Clone: \`git clone ${cloneUrl}\``,
+      `Clone: \`git clone ${clone}\``,
       'A `git push` redeploys the project automatically.',
     ].join('\n');
   }
