@@ -98,25 +98,39 @@ export class HostExec {
    * bounces the daemon — the caller must warn the user it will be back shortly.
    */
   async selfUpdate(repoDir: string): Promise<HostExecResult> {
-    const safe = repoDir.replace(/'/g, '');
+    // repoDir comes from our own env (BOTSMAN_REPO_DIR / install.sh), never user
+    // text — but fail LOUDLY on an unexpected path instead of silently rewriting
+    // it. Validated to an absolute, shell-safe path so the single-quoting below
+    // is sound.
+    if (!/^\/[\w./-]+$/.test(repoDir)) {
+      return { ok: false, exitCode: -1, output: `Refusing to self-update: unexpected repo path ${JSON.stringify(repoDir)}.`, timedOut: false };
+    }
+    const r = repoDir;
     // Robust update:
     //  - `git fetch + reset --hard` tolerates a dirty / divergent / shallow
     //    (`clone --depth 1`) checkout that `git pull --ff-only` would choke on;
-    //    safe.directory avoids git's "dubious ownership" refusal under host root.
-    //    (reset --hard only touches tracked files — the untracked .env is kept.)
-    //  - the BUILD runs in the FOREGROUND so a failure is reported to the owner
-    //    instead of vanishing into a backgrounded log; only the final `up -d`
-    //    (which recreates, and so kills, this daemon) is detached so it can
-    //    finish after the daemon goes down.
+    //    safe.directory (added idempotently — `--add` alone would duplicate the
+    //    line in root's ~/.gitconfig every run) avoids git's "dubious ownership"
+    //    refusal under host root. reset --hard only touches tracked files, so the
+    //    untracked .env is kept.
+    //  - `docker compose config -q` (foreground) catches a bad/changed compose
+    //    file BEFORE the daemon is bounced — the most catchable `up -d` failure.
+    //  - the BUILD runs in the FOREGROUND so its failure is reported (ok=false),
+    //    not lost to a log; only the final `up -d` (which recreates, and so
+    //    kills, this daemon) is detached so it can finish after the daemon dies.
+    //    An `up -d` failure after that point can't be observed here — the caller
+    //    sets expectations and points at the log.
     const script =
-      `cd '${safe}' && ` +
-      `git config --global --add safe.directory '${safe}' && ` +
+      `cd '${r}' && ` +
+      `(git config --global --get-all safe.directory 2>/dev/null | grep -qxF '${r}' || ` +
+      `git config --global --add safe.directory '${r}') && ` +
       `git fetch origin main && git reset --hard FETCH_HEAD && ` +
-      `docker compose build && ` +
+      `docker compose config -q && docker compose build && ` +
       `(nohup docker compose up -d >/tmp/botsman-selfupdate.log 2>&1 &)`;
-    // Foreground build can take a few minutes on a small VPS (tsc + any changed
-    // layers); generous cap. Cached rebuilds (only src changed) are ~1 min.
-    return this.runOnHost(script, { label: 'self_update', timeoutMs: 12 * 60_000 });
+    // A cold rebuild re-runs the slow `playwright install` (Chromium download);
+    // give it real headroom so the cap doesn't SIGKILL it. Cached rebuilds
+    // (only src changed) are ~1 min.
+    return this.runOnHost(script, { label: 'self_update', timeoutMs: 20 * 60_000 });
   }
 
   /** Pull the helper image if it isn't on the host — createContainer won't. */
