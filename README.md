@@ -29,7 +29,7 @@ Botsman:  ✓ Updated. Same link.
 - [Key ideas](#key-ideas)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
-- [Using it](#using-it) — [talking](#how-you-talk-to-it) · [rooms & focus](#rooms--focus) · [commands](#slash-commands) · [memory](#project-memory)
+- [Using it](#using-it) — [talking](#how-you-talk-to-it) · [rooms & context](#rooms--context) · [commands](#slash-commands) · [memory](#project-memory)
 - [Security](#security)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing) · [License](#license)
@@ -135,12 +135,15 @@ Server reads (metrics, logs, diagnosis) run immediately; anything that changes s
 
 **Botsman never silently guesses.** If a message could be a new project or a change to an existing one — or it's unclear which project — it **asks with buttons** ("Change 📦 todo? · 🆕 New project") instead of acting. Before building something whose name resembles an existing project, it checks with you first.
 
-### Rooms & focus
+### Rooms & context
 
-The persistent buttons below the message box are shortcuts, not modes:
+The persistent buttons below the message box change with where you are — and they're command-driven, so they keep working even if the AI is unreachable (out of quota, network hiccup):
 
-- **🔗 Connect to a project** (tap it under **📦 Projects**, or say "go to todo") — while connected, every change and question goes straight to it with no prompts. Tap **🏠** to disconnect.
-- Not connected? Routing is by content, and anything ambiguous is confirmed first.
+- **🏠 Home** — a control panel: a status line (live projects, anything down, AI-router health, startup warnings) and one-tap buttons — **📊 Server status · 📦 Projects · ⬆️ Update Botsman · 🔧 Setup · 💻 Code on your computer**. To start a new project, just describe it right here.
+- **📦 Connect to a project** (tap one under **📦 Projects**, or say "go to todo") — while connected, every change and question goes straight to it, and the bar becomes project actions: **🔍 Review** (a read-only code pass), **📋 Logs**, **↩️ Rollback** (asks first), **💻 Claude Code** (a ready clone + `claude` + `git push` guide). Tap **🚪 Exit** to disconnect.
+- **🛠 Server** — admin mode: ask in plain language ("show load", "clean up disk", "update the server"), with one-tap buttons for the common ones. Server reads run immediately; state changes confirm once, host-level actions twice.
+
+Outside a connection, routing is by content and anything ambiguous is confirmed first. The keyboards are an additional reliable surface, not a mode wall — and because taps are deterministic, Home and the room actions work even when the LLM router is down (it tells you so, and points you to Home).
 
 ### Slash commands
 
@@ -165,7 +168,7 @@ It's committed to git (so it travels with `git clone` and is restored on `/rollb
 
 ### From your editor
 
-`/status <project>` shows a git clone URL. Clone it, edit on your laptop, and `git push` — Botsman redeploys automatically and tells you in the chat. Agent commits are prefixed `botsman:`; yours are not.
+Connect to a project and tap **💻 Claude Code** (or run `/status <project>`) to get a ready-to-paste clone command — Botsman fills in your server's public IP, the repo path, and the SSH user it infers from the install path. Clone it, edit on your laptop or in Claude Code, and `git push` — Botsman redeploys automatically and tells you in the chat. Agent commits are prefixed `botsman:`; yours are not.
 
 ---
 
