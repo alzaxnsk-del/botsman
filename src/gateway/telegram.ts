@@ -13,16 +13,17 @@ import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
 import { getFocus, setFocus, clearFocus, roomKeyboard, detectRoomSwitch, type Room } from './rooms.js';
 import {
   routeMessage, runReadOp, runMutatingOp, looksOperational, looksLikeQuestion, missingSlugPrompt,
-  runDevOpsConfirm,
+  runDevOpsConfirm, opLiteral,
   type DevOpsOp, type DevOpsDeps, type Route,
 } from './devops.js';
-import type { StructuredLlm } from '../llm.js';
+import { homeStatusLines, homeKeyboard, degradedNoneMessage } from './home.js';
+import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
 import { MEMORY_FILE, type Orchestrator, type TaskOutcome } from '../orchestrator.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
 import type { DeployEngine } from '../deploy/engine.js';
-import { RESTART_NOTICE_KEY, SETUP_BACKUP_KEY, type Stage } from '../types.js';
+import { RESTART_NOTICE_KEY, SETUP_BACKUP_KEY, PREFLIGHT_WARNINGS_KEY, type Stage } from '../types.js';
 
 const STAGE_LABELS: Record<Stage, string> = {
   accepted: '📥 Got it, working…',
@@ -61,6 +62,7 @@ export class TelegramGateway {
     private hostExec: HostExec,
     private hostRepoDir: string,
     private structuredLlm?: StructuredLlm,
+    private llmHealth?: LlmHealth,
   ) {
     this.bot = new Bot(token);
     this.wire();
@@ -210,17 +212,7 @@ export class TelegramGateway {
 
     // Re-configuration without a console: clearing a config piece and
     // restarting drops the daemon into in-chat onboarding for that piece.
-    this.bot.command('setup', async (ctx) => {
-      const kb = new InlineKeyboard()
-        .text('🔑 Coding agent auth', 'setup:auth')
-        .text('🌐 Domain', 'setup:domain')
-        .row()
-        .text('🧠 Model', 'setup:model')
-        .text('📊 Toggle telemetry', 'setup:telemetry');
-      await ctx.reply(`What do you want to change? Current model: ${modelLabel(this.currentModel())}.`, {
-        reply_markup: kb,
-      });
-    });
+    this.bot.command('setup', (ctx) => this.sendSetupMenu(ctx));
 
     // In-chat diagnostics with one-tap fixes (no console needed).
     this.bot.command('doctor', async (ctx) => {
@@ -343,6 +335,40 @@ export class TelegramGateway {
         return;
       }
 
+      // Home panel buttons — all command-driven, zero LLM calls.
+      if (data.startsWith('home:')) {
+        const what = data.slice('home:'.length);
+        if (what === 'metrics') {
+          await ctx.answerCallbackQuery({ text: 'Reading…' });
+          const result = await runReadOp(opLiteral('host_metrics'), this.devopsDeps())
+            .catch((e) => `Error: ${(e as Error).message}`);
+          await this.replyMdSafe(ctx, result); // new message — the panel stays put
+          return;
+        }
+        if (what === 'projects') {
+          await ctx.answerCallbackQuery();
+          await this.showProjectPicker(ctx);
+          return;
+        }
+        if (what === 'setup') {
+          await ctx.answerCallbackQuery();
+          await this.sendSetupMenu(ctx);
+          return;
+        }
+        if (what === 'update') {
+          // Host-level op: a fresh confirm message that drops straight into the
+          // existing devops:exec/exec2 double-confirm (hostLevel auto-engages it).
+          await ctx.answerCallbackQuery();
+          const op = opLiteral('self_update');
+          const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
+          const sent = await ctx.reply(`${op.humanSummary}?`, { reply_markup: kb });
+          this.pendingDevOps.set(chatId, { messageId: sent.message_id, op, confirmed: false });
+          return;
+        }
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
       // DevOps confirm / cancel (with a second confirm for host-level ops).
       if (data === 'devops:exec' || data === 'devops:cancel' || data === 'devops:exec2') {
         const entry = this.pendingDevOps.get(chatId);
@@ -439,12 +465,60 @@ export class TelegramGateway {
     }
     const wasConnected = getFocus(this.store, chatId);
     clearFocus(this.store, chatId);
-    const hint = room.kind === 'devops'
-      ? 'Ask about the server in plain language: "show load", "clean up disk", "restart <project>", "update the server".'
-      : wasConnected
-        ? `🏠 Disconnected from ${wasConnected}. Messages route by content again — I'll ask if I'm unsure.`
-        : 'Tell me what to build or change, ask about the server, or connect to a project — all in plain language.';
-    await ctx.reply(hint, { reply_markup: roomKeyboard() });
+    if (room.kind === 'devops') {
+      await ctx.reply(
+        'Ask about the server in plain language: "show load", "clean up disk", "restart <project>", "update the server".',
+        { reply_markup: roomKeyboard() },
+      );
+      return;
+    }
+    // Home is a command-driven control panel (no AI), so it keeps working even
+    // when the LLM router is down — and surfaces problems + how to fix them.
+    return void this.showHome(ctx, wasConnected);
+  }
+
+  /**
+   * The Home control panel: a status section + command buttons, rendered with no
+   * LLM calls. Status counts come from the DB + a cheap container probe; the AI
+   * line reads the in-memory health snapshot; preflight warnings come from kv.
+   */
+  private async showHome(ctx: Context, wasConnected?: string | null): Promise<void> {
+    const projects = this.store.listProjects();
+    let live = 0;
+    let down = 0;
+    for (const p of projects) {
+      if (p.status !== 'live') continue;
+      live++;
+      const running = await this.deployEngine.containerRunning(p.slug).catch(() => false);
+      if (!running) down++;
+    }
+    let preflightWarnings = 0;
+    try {
+      const raw = this.store.kvGet(PREFLIGHT_WARNINGS_KEY);
+      if (raw) preflightWarnings = (JSON.parse(raw) as string[]).length;
+    } catch { /* ignore malformed kv */ }
+
+    const lines = homeStatusLines({
+      disconnectedFrom: wasConnected ?? null,
+      projects: { live, down, total: projects.length },
+      llm: this.llmHealth?.snapshot() ?? null,
+      llmConfigured: !!this.structuredLlm,
+      preflightWarnings,
+    });
+    await ctx.reply(lines.join('\n'), { reply_markup: homeKeyboard() });
+  }
+
+  /** The /setup menu (also reached from the Home panel's 🔧 Setup button). */
+  private async sendSetupMenu(ctx: Context): Promise<void> {
+    const kb = new InlineKeyboard()
+      .text('🔑 Coding agent auth', 'setup:auth')
+      .text('🌐 Domain', 'setup:domain')
+      .row()
+      .text('🧠 Model', 'setup:model')
+      .text('📊 Toggle telemetry', 'setup:telemetry');
+    await ctx.reply(`What do you want to change? Current model: ${modelLabel(this.currentModel())}.`, {
+      reply_markup: kb,
+    });
   }
 
   private async showProjectPicker(ctx: Context): Promise<void> {
@@ -576,6 +650,16 @@ export class TelegramGateway {
         return;
       }
       case 'none': {
+        // The router gave nothing back. Distinguish a real outage (the LLM call
+        // just failed synchronously inside the awaited routeMessage, so the
+        // health snapshot is fresh) from a genuine "couldn't classify" — on an
+        // outage, say so and point at Home rather than the misleading
+        // "new or change?" prompt. Don't stash pendingAmbiguous on an outage.
+        const degraded = degradedNoneMessage(this.llmHealth?.snapshot() ?? null);
+        if (degraded) {
+          await this.bot.api.editMessageText(chatId, thinkingId, degraded).catch(() => {});
+          return;
+        }
         // Couldn't classify: bias the clarification by what the text looked like.
         if (looksOperational(text)) {
           await this.bot.api.editMessageText(
