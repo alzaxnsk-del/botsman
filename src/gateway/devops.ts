@@ -325,13 +325,21 @@ export async function runMutatingOp(op: DevOpsOp, deps: DevOpsDeps): Promise<str
       return r.ok ? `✓ ${r.output}` : `✗ Prune failed: ${r.output}`;
     }
     case 'self_update': {
+      // Persist the back-online notice BEFORE the update, so a fast container
+      // recreate can't race the SQLite write; clear it if the build never lands.
+      deps.store.kvSet(RESTART_NOTICE_KEY, '✓ Botsman updated and back online.');
       const r = await deps.hostExec.selfUpdate(deps.hostRepoDir);
-      if (r.ok) deps.store.kvSet(RESTART_NOTICE_KEY, '✓ Botsman updated and back online.');
-      // The build ran in the foreground, so ok=false carries the real failure
-      // (git or docker build) instead of a misleading "started".
-      return r.ok
-        ? '✓ Update built — restarting now. I will be back in ~30–60s.'
-        : `✗ Self-update failed:\n${r.output.slice(-800) || '(no output)'}`;
+      if (r.ok) {
+        // Build + config check passed; only the detached `docker compose up -d`
+        // remains, which we can't observe (it kills this daemon). Set the
+        // expectation so silence is diagnosable rather than mistaken for success.
+        return '✓ Update built — recreating the container now. I should come back with the new version in ~30–60s. If I go quiet for a few minutes, check `docker compose logs botsman` or /tmp/botsman-selfupdate.log on the host.';
+      }
+      deps.store.kvSet(RESTART_NOTICE_KEY, '');
+      if (r.timedOut) {
+        return '✗ Self-update timed out. The build may still be finishing on the host — wait a couple of minutes, then check `docker compose ps` / /tmp/botsman-selfupdate.log before retrying (don\'t start a second build).';
+      }
+      return `✗ Self-update failed:\n${r.output.slice(-800) || '(no output)'}`;
     }
     case 'host_update': {
       const r = await deps.hostExec.hostPackageUpdate();
