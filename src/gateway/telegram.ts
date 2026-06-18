@@ -25,6 +25,7 @@ import { localDevInstructions } from '../clone.js';
 import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
 import { MEMORY_FILE, type Orchestrator, type TaskOutcome } from '../orchestrator.js';
+import { versionLine } from '../version.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
 import type { DeployEngine } from '../deploy/engine.js';
@@ -163,6 +164,9 @@ export class TelegramGateway {
           '/rollback <slug> — roll back to the previous version',
           '/delete <slug> — delete a project',
           '/setup — change agent auth, domain or telemetry',
+          '/version — the running version',
+          '',
+          versionLine(),
         ].join('\n'),
         { reply_markup: this.replyKeyboardFor(ctx.chat!.id) },
       ),
@@ -475,6 +479,7 @@ export class TelegramGateway {
     this.bot.command('home', (ctx) => this.switchRoom(ctx, { kind: 'home' }));
     this.bot.command('server', (ctx) => this.switchRoom(ctx, { kind: 'devops' }));
     this.bot.command('projects', (ctx) => this.showProjectPicker(ctx));
+    this.bot.command('version', (ctx) => ctx.reply(versionLine()));
 
     this.bot.on('message:text', async (ctx) => {
       const chatId = ctx.chat.id;
