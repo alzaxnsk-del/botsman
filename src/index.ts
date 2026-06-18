@@ -7,7 +7,7 @@ import { logger } from './logger.js';
 import { paths } from './paths.js';
 import { configExists, loadConfig, missingSetup, ConfigError } from './config.js';
 import { OnboardingBot, READY_NOTIFY_KEY } from './gateway/onboarding.js';
-import { RESTART_NOTICE_KEY } from './types.js';
+import { RESTART_NOTICE_KEY, PREFLIGHT_WARNINGS_KEY } from './types.js';
 import { Store } from './db.js';
 import { Telemetry } from './telemetry.js';
 import { ClaudeCodeAgent } from './agent/ClaudeCodeAgent.js';
@@ -21,7 +21,7 @@ import { startControlServer, startHealthServer, CONTROL_PORT } from './control.j
 import { preflight } from './preflight.js';
 import { runSetupWizard } from './setup.js';
 import { suggestSlugLLM, suggestSlugCLI } from './naming.js';
-import { makeStructuredLlm } from './llm.js';
+import { makeStructuredLlm, makeLlmHealth } from './llm.js';
 import { HostExec } from './hostExec.js';
 
 async function main(): Promise<void> {
@@ -99,6 +99,10 @@ async function main(): Promise<void> {
   const store = new Store();
   const telemetry = new Telemetry(store, config);
   await telemetry.onInstall();
+  // Persist this start's preflight warnings so the Home panel can show
+  // server-wide issues without re-probing. Always rewrite (an empty array on a
+  // clean start clears stale warnings).
+  store.kvSet(PREFLIGHT_WARNINGS_KEY, JSON.stringify(pre.warnings));
 
   const pgSuperPassword = process.env.BOTSMAN_PG_PASSWORD ?? 'botsman';
   const pgAdmin = new PostgresAdmin(docker, pgSuperPassword);
@@ -159,13 +163,15 @@ async function main(): Promise<void> {
 
   // Conversational rooms: a structured LLM (DevOps + project routers) and the
   // privileged host-exec helper. structuredLlm uses the same auth as the namer.
-  const structuredLlm = makeStructuredLlm({ apiKey, oauthToken: oauth });
+  // llmHealth lets the gateway tell "router unreachable" from "no answer".
+  const llmHealth = makeLlmHealth();
+  const structuredLlm = makeStructuredLlm({ apiKey, oauthToken: oauth }, llmHealth);
   const hostExec = new HostExec(docker);
   const hostRepoDir = process.env.BOTSMAN_REPO_DIR ?? '/opt/botsman';
 
   const gateway = new TelegramGateway(
     config.telegramBotToken, config.ownerIds, orchestrator, store, deployEngine, telemetry,
-    docker, hostExec, hostRepoDir, structuredLlm,
+    docker, hostExec, hostRepoDir, structuredLlm, llmHealth,
   );
 
   startControlServer(orchestrator, controlToken, (slug, _ok, message) => void gateway.notifyOwner(message));
