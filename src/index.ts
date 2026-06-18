@@ -22,6 +22,7 @@ import { preflight } from './preflight.js';
 import { runSetupWizard } from './setup.js';
 import { suggestSlugLLM, suggestSlugCLI } from './naming.js';
 import { makeStructuredLlm, makeLlmHealth } from './llm.js';
+import { versionLine } from './version.js';
 import { HostExec } from './hostExec.js';
 
 async function main(): Promise<void> {
@@ -203,7 +204,9 @@ async function main(): Promise<void> {
   const backNotice = store.kvGet(RESTART_NOTICE_KEY);
   if (backNotice) {
     store.kvSet(RESTART_NOTICE_KEY, '');
-    await gateway.notifyOwner(backNotice, true);
+    // Append the now-running version+date — after a self-update this is the new
+    // build's number (this is fresh code reading its own version.ts).
+    await gateway.notifyOwner(`${backNotice}\n${versionLine()}`, true);
   }
   logger.info('botsman started');
 
