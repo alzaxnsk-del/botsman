@@ -1,7 +1,6 @@
 # Installation
 
-Full setup guide for a clean Ubuntu 22.04 / 24.04 VPS. Русская версия всей
-документации: [README.ru.md](README.ru.md).
+Full setup guide for a clean Ubuntu 22.04 / 24.04 VPS.
 
 ## Before you start
 
