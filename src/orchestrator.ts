@@ -31,9 +31,12 @@ export interface TaskOutcome {
   /** API spend reported by the coding agent. */
   costUsd?: number;
   error?: string;
+  /** True when the task was cancelled while still queued (never ran). */
+  cancelled?: boolean;
 }
 
 interface QueueItem {
+  id: number;
   kind: TaskKind;
   slug?: string;
   instruction: string;
@@ -49,6 +52,7 @@ interface QueueItem {
 export class Orchestrator {
   private queue: QueueItem[] = [];
   private running = false;
+  private seq = 0;
 
   constructor(
     private store: Store,
@@ -67,11 +71,35 @@ export class Orchestrator {
     return this.queue.length + (this.running ? 1 : 0);
   }
 
-  enqueue(kind: TaskKind, instruction: string, report: StageReporter, slug?: string): Promise<TaskOutcome> {
+  /**
+   * Enqueue a task. `onEnqueued` (if given) is invoked synchronously with a
+   * cancel function the caller can wire to a button. The cancel ONLY works while
+   * the task is still queued (not yet started): a running task can't be aborted
+   * without corrupting repo/DB invariants, so cancelling it is a no-op → false.
+   */
+  enqueue(
+    kind: TaskKind,
+    instruction: string,
+    report: StageReporter,
+    slug?: string,
+    onEnqueued?: (cancel: () => boolean) => void,
+  ): Promise<TaskOutcome> {
     return new Promise((resolve) => {
-      this.queue.push({ kind, slug, instruction, report, resolve });
+      const id = ++this.seq;
+      this.queue.push({ id, kind, slug, instruction, report, resolve });
+      onEnqueued?.(() => this.cancelQueued(id, slug));
       void this.drain();
     });
+  }
+
+  /** Remove a not-yet-started item from the queue and resolve it as cancelled.
+   *  Returns false if it's already running or finished (can't abort in-flight). */
+  private cancelQueued(id: number, slug?: string): boolean {
+    const idx = this.queue.findIndex((q) => q.id === id);
+    if (idx === -1) return false;
+    const [item] = this.queue.splice(idx, 1);
+    item.resolve({ ok: false, slug: slug ?? item.slug ?? '', error: 'Cancelled before it started.', cancelled: true });
+    return true;
   }
 
   private async drain(): Promise<void> {

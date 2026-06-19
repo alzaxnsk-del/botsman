@@ -76,6 +76,8 @@ export class TelegramGateway {
   private pendingDevOps = new Map<number, { messageId: number; op: DevOpsOp; confirmed: boolean }>();
   /** A failed task offering a 🔁 Retry; messageId guards stale buttons. */
   private pendingRetry = new Map<number, { messageId: number; kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string }>();
+  /** Cancel fns for still-queued tasks, keyed by their status message id (🚫 Cancel). */
+  private pendingTaskCancel = new Map<number, () => boolean>();
   /** Chats with a 🔍 Review agent run in flight — debounces repeated taps. */
   private reviewing = new Set<number>();
 
@@ -506,6 +508,18 @@ export class TelegramGateway {
         this.pendingRetry.delete(chatId);
         await ctx.answerCallbackQuery({ text: 'Retrying…' });
         return void this.runTask(entry.kind, entry.slug, entry.instruction, ctx);
+      }
+
+      // 🚫 Cancel a still-queued task. Keyed by the status message's id; a no-op
+      // once it's running (the orchestrator returns false → "too late").
+      if (data === 'taskcancel') {
+        const mid = ctx.callbackQuery.message?.message_id;
+        const cancel = mid != null ? this.pendingTaskCancel.get(mid) : undefined;
+        if (!cancel) return void ctx.answerCallbackQuery({ text: 'Nothing to cancel.' });
+        const ok = cancel(); // resolves the task as cancelled → runTask renders it
+        if (ok && mid != null) this.pendingTaskCancel.delete(mid);
+        await ctx.answerCallbackQuery({ text: ok ? 'Cancelled' : 'Already running — too late to cancel.' });
+        return;
       }
 
       // 🩺 Doctor on a failed/again-broken project (from the failure card).
@@ -1043,22 +1057,23 @@ export class TelegramGateway {
     ctx: Context,
   ): Promise<void> {
     const chatId = ctx.chat!.id;
-    // Acknowledge clearly when busy: the message IS received, it's just queued
-    // (one task at a time). Kept in lastText so the heartbeat doesn't drop it
-    // while waiting; the first real stage update replaces it once it starts.
-    const queued = this.orchestrator.queueLength > 0
+    // When something is already running, this task WAITS — say so clearly and
+    // offer a 🚫 Cancel (it can still be pulled from the queue). A running task
+    // can't be aborted, so the button only appears while queued.
+    const wasQueued = this.orchestrator.queueLength > 0;
+    const queued = wasQueued
       ? '\n⏳ Queued — one task at a time; this starts right after the current one finishes.'
       : '';
-    // IMPORTANT: no reply_markup here. This message is edited live through the
-    // task stages, and Telegram cannot editMessageText a message that carries a
-    // ReplyKeyboardMarkup — attaching the room keyboard here froze the status at
-    // "Got it, working…". The keyboard is surfaced by /start, /list, the ready
-    // message and room switches instead.
     // Name the target project from the first frame, so an edit/rollback never
     // leaves the user guessing WHICH project is changing (create fills it in once
     // the slug is generated, via the 'accepted' detail below).
     const head = STAGE_LABELS.accepted + (slug ? ` · ${slug}` : '') + queued;
-    const statusMsg = await ctx.reply(head);
+    // The 🚫 Cancel button is the ONE time this status message carries an inline
+    // keyboard. It's dropped the instant the task starts (the live heartbeat edits
+    // strip reply_markup anyway), so the two never fight. No room keyboard here:
+    // editMessageText can't edit a message bearing a ReplyKeyboardMarkup.
+    const cancelKb = wasQueued ? new InlineKeyboard().text('🚫 Cancel', 'taskcancel') : undefined;
+    const statusMsg = await ctx.reply(head, cancelKb ? { reply_markup: cancelKb } : {});
 
     let lastText = head;
     let dots = 0;
@@ -1066,6 +1081,9 @@ export class TelegramGateway {
     // Once the outcome is being reported, stage/heartbeat edits must stop —
     // an in-flight "✅ Done" edit racing the rich final message would win.
     let finished = false;
+    let started = !wasQueued; // a task with nothing ahead is running immediately
+    let earlyNudge: ReturnType<typeof setTimeout> | null = null;
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
     const update = async (text: string) => {
       if (finished) return;
       lastText = text;
@@ -1081,10 +1099,18 @@ export class TelegramGateway {
       const text = `${withElapsed(lastText, stageStartedAt, Date.now())}${'.'.repeat(dots)}`;
       void this.bot.api.editMessageText(chatId, statusMsg.message_id, text).catch(() => {});
     };
-    // A one-shot early nudge so the first sign of life isn't a full 25s away.
-    const earlyNudge = setTimeout(tick, 9_000);
-    const heartbeat = setInterval(tick, HEARTBEAT_MS);
-    const stopTicks = (): void => { clearTimeout(earlyNudge); clearInterval(heartbeat); };
+    // Don't tick while merely QUEUED — a heartbeat edit would strip the 🚫 Cancel
+    // button. Start it only once the task actually begins (idempotent).
+    const startTicks = (): void => {
+      if (heartbeat) return;
+      earlyNudge = setTimeout(tick, 9_000); // first sign of life well before 25s
+      heartbeat = setInterval(tick, HEARTBEAT_MS);
+    };
+    const stopTicks = (): void => {
+      if (earlyNudge) clearTimeout(earlyNudge);
+      if (heartbeat) clearInterval(heartbeat);
+    };
+    if (!wasQueued) startTicks();
 
     try {
       const outcome = await this.orchestrator.enqueue(
@@ -1092,16 +1118,25 @@ export class TelegramGateway {
         instruction,
         (stage, detail) => {
           if (stage === 'accepted' && detail) slug = detail;
+          // First report = it actually started running → retire the Cancel button.
+          if (!started) {
+            started = true;
+            this.pendingTaskCancel.delete(statusMsg.message_id);
+          }
           // 'done'/'failed' are not shown as stages: the rich outcome message
           // (link, summary, screenshot) supersedes them.
           if (stage === 'done' || stage === 'failed') return;
+          startTicks(); // begin the heartbeat now that work is underway
           const target = slug ? ` · ${slug}` : '';
           void update(`${STAGE_LABELS[stage]}${target}${detail && stage !== 'accepted' ? ` — ${detail}` : ''}`);
         },
         slug,
+        // Register the cancel fn only while queued; the button uses it by messageId.
+        (cancel) => { if (wasQueued) this.pendingTaskCancel.set(statusMsg.message_id, cancel); },
       );
       finished = true;
       stopTicks();
+      this.pendingTaskCancel.delete(statusMsg.message_id);
       await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction });
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
       // A fresh build → connect to it, so the next message goes straight to the
@@ -1122,6 +1157,7 @@ export class TelegramGateway {
     } catch (e) {
       stopTicks();
       finished = true;
+      this.pendingTaskCancel.delete(statusMsg.message_id);
       await this.reportOutcome(
         ctx, chatId, statusMsg.message_id,
         { ok: false, slug: slug ?? '', error: (e as Error).message },
@@ -1134,6 +1170,12 @@ export class TelegramGateway {
     ctx: Context, chatId: number, statusMsgId: number, o: TaskOutcome,
     retry?: { kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string },
   ): Promise<void> {
+    if (o.cancelled) {
+      // Cancelled while queued — never ran, so no Retry/Doctor card, just a
+      // clean acknowledgement (and the 🚫 button is dropped with this edit).
+      await this.bot.api.editMessageText(chatId, statusMsgId, "🚫 Cancelled — didn't run.").catch(() => {});
+      return;
+    }
     if (!o.ok) {
       // Not a dead end: offer 🔁 Retry (re-runs the request) and 🩺 Doctor when
       // the project actually exists, with a plain-language lead over trimmed logs.
