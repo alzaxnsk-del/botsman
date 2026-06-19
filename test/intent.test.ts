@@ -9,9 +9,14 @@ describe('looksLikeDelete (keeps delete out of the edit fast-path)', () => {
     expect(looksLikeDelete('delete the shop project')).toBe(true);
     expect(looksLikeDelete('remove todo')).toBe(true);
   });
+  it('flags the unambiguous destroy verbs (RU + EN)', () => {
+    expect(looksLikeDelete('уничтожь проект todo')).toBe(true);
+    expect(looksLikeDelete('destroy the shop')).toBe(true);
+  });
   it('does not flag normal edits', () => {
     expect(looksLikeDelete('add a dark theme')).toBe(false);
     expect(looksLikeDelete('убери лишний отступ сверху')).toBe(false); // "убери" ≠ delete-project
+    expect(looksLikeDelete('сотри фон у кнопки')).toBe(false); // "сотри" is a content edit
   });
 });
 
@@ -44,6 +49,11 @@ describe('looksLikeCreate', () => {
     expect(looksLikeCreate('build a snake game')).toBe(true);
     expect(looksLikeCreate('сделай магазин')).toBe(true);
     expect(looksLikeCreate('нужен лендинг')).toBe(true);
+  });
+  it('flags the added RU synonyms / infinitives', () => {
+    expect(looksLikeCreate('разработай дашборд продаж')).toBe(true);
+    expect(looksLikeCreate('создать сервис заметок')).toBe(true);
+    expect(looksLikeCreate("i'd like a blog")).toBe(true);
   });
   it('does not flag plain edits', () => {
     expect(looksLikeCreate('add a dark theme')).toBe(false);
