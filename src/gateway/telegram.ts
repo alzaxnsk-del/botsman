@@ -21,6 +21,7 @@ import {
   type DevOpsOp, type DevOpsOpId, type DevOpsDeps, type Route,
 } from './devops.js';
 import { homeStatusLines, homeKeyboard, degradedNoneMessage } from './home.js';
+import { failureMessage } from './format.js';
 import { localDevInstructions } from '../clone.js';
 import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
@@ -67,12 +68,14 @@ const REVIEW_PROMPT =
  */
 export class TelegramGateway {
   private bot: Bot;
-  /** slug awaiting a second-message confirmation for /delete (§5). */
-  private pendingDelete = new Map<number, string>();
+  /** project awaiting a tap-to-confirm /delete; messageId guards stale buttons. */
+  private pendingDelete = new Map<number, { messageId: number; slug: string }>();
   /** free text awaiting "new or edit?" disambiguation, keyed by chat; messageId guards stale buttons. */
   private pendingAmbiguous = new Map<number, { messageId: number; text: string }>();
   /** DevOps op awaiting a confirm button; messageId guards stale clicks. */
   private pendingDevOps = new Map<number, { messageId: number; op: DevOpsOp; confirmed: boolean }>();
+  /** A failed task offering a 🔁 Retry; messageId guards stale buttons. */
+  private pendingRetry = new Map<number, { messageId: number; kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string }>();
   /** Chats with a 🔍 Review agent run in flight — debounces repeated taps. */
   private reviewing = new Set<number>();
 
@@ -238,11 +241,7 @@ export class TelegramGateway {
       const slug = this.argSlug(ctx);
       if (!slug) return void ctx.reply('Usage: /delete <slug>');
       if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
-      this.pendingDelete.set(ctx.chat!.id, slug);
-      await ctx.reply(
-        `⚠️ Delete project *${slug}* together with its database and code? This cannot be undone.\n\nReply "yes" to confirm; anything else cancels.`,
-        { parse_mode: 'Markdown' },
-      );
+      await this.promptDelete(ctx, slug);
     });
 
     // Re-configuration without a console: clearing a config piece and
@@ -461,6 +460,56 @@ export class TelegramGateway {
         return;
       }
 
+      // Delete confirm / cancel (tap, not type — a stray "yes"/"да" can't delete,
+      // and a natural "yes, delete it" is no longer silently lost).
+      if (data === 'delete:exec' || data === 'delete:cancel') {
+        const entry = this.pendingDelete.get(chatId);
+        if (!entry || entry.messageId !== ctx.callbackQuery.message?.message_id) {
+          return void ctx.answerCallbackQuery({ text: 'This button is stale.' });
+        }
+        this.pendingDelete.delete(chatId);
+        if (data === 'delete:cancel') {
+          await ctx.answerCallbackQuery({ text: 'Cancelled' });
+          await this.bot.api.editMessageText(chatId, entry.messageId, 'Deletion cancelled.').catch(() => {});
+          return;
+        }
+        await ctx.answerCallbackQuery({ text: 'Deleting…' });
+        const wasConnected = getFocus(this.store, chatId) === entry.slug;
+        await this.bot.api.editMessageText(chatId, entry.messageId, `🗑 Deleting ${entry.slug}…`).catch(() => {});
+        const outcome = await this.orchestrator.enqueue('delete', '', () => {}, entry.slug);
+        await this.bot.api.editMessageText(
+          chatId, entry.messageId, outcome.ok ? `🗑 ${outcome.summary}` : `❌ ${outcome.error}`,
+        ).catch(() => {});
+        // If we just deleted the connected project, restore the global bar so the
+        // keyboard matches reality (an editMessageText can't carry a reply keyboard).
+        if (outcome.ok && wasConnected) {
+          await ctx.reply('🚪 Back to Home — that project is gone.', { reply_markup: roomKeyboard() }).catch(() => {});
+        }
+        return;
+      }
+
+      // 🔁 Retry a failed task (re-runs the original request). messageId-guarded
+      // like the other pending buttons so an old failure card can't re-fire.
+      if (data === 'retry') {
+        const entry = this.pendingRetry.get(chatId);
+        if (!entry || entry.messageId !== ctx.callbackQuery.message?.message_id) {
+          return void ctx.answerCallbackQuery({ text: 'This button is stale.' });
+        }
+        this.pendingRetry.delete(chatId);
+        await ctx.answerCallbackQuery({ text: 'Retrying…' });
+        return void this.runTask(entry.kind, entry.slug, entry.instruction, ctx);
+      }
+
+      // 🩺 Doctor on a failed/again-broken project (from the failure card).
+      if (data.startsWith('doctor:')) {
+        await ctx.answerCallbackQuery();
+        const slug = data.slice('doctor:'.length);
+        if (!this.store.projectExists(slug)) return void ctx.reply('That project no longer exists.');
+        const msg = await ctx.reply(`🩺 Checking ${slug}…`);
+        await this.editDoctorReport(chatId, msg.message_id, slug);
+        return;
+      }
+
       await ctx.answerCallbackQuery();
       const pending = this.pendingAmbiguous.get(chatId);
       // A click on an outdated question must not apply the latest text.
@@ -484,24 +533,6 @@ export class TelegramGateway {
     this.bot.on('message:text', async (ctx) => {
       const chatId = ctx.chat.id;
       const text = ctx.message.text.trim();
-
-      // /delete confirmation flow (second message, §5).
-      const pending = this.pendingDelete.get(chatId);
-      if (pending) {
-        this.pendingDelete.delete(chatId);
-        if (/^(да|yes|y)\.?$/i.test(text)) {
-          const outcome = await this.orchestrator.enqueue('delete', '', () => {}, pending);
-          // If we just deleted the connected project, getFocus self-heals to
-          // null → restore the global bar so the keyboard matches reality.
-          await ctx.reply(
-            outcome.ok ? `🗑 ${outcome.summary}` : `❌ ${outcome.error}`,
-            outcome.ok ? { reply_markup: this.replyKeyboardFor(chatId) } : {},
-          );
-        } else {
-          await ctx.reply('Deletion cancelled.');
-        }
-        return;
-      }
 
       // A focus shortcut (keyboard button / NL "go to X") wins — instant, free.
       const slugs = this.store.listProjects().map((p) => p.slug);
@@ -543,6 +574,16 @@ export class TelegramGateway {
       }
 
       return this.handleMessage(ctx, text);
+    });
+
+    // Any NON-text message (photo / voice / document / sticker / video / …):
+    // acknowledge it so "just talk" never meets silence. message:text above
+    // handles text and stops propagation, so this only fires for non-text.
+    this.bot.on('message', async (ctx) => {
+      await ctx.reply(
+        "I can only read text right now — describe what you need in words. " +
+        "(Photos, voice notes and files aren't supported yet.)",
+      );
     });
 
     this.bot.catch((err) => logger.error('telegram handler error', { error: String(err.error) }));
@@ -760,13 +801,13 @@ export class TelegramGateway {
         return void this.editMdSafe(chatId, thinkingId, res.answer || 'No answer.');
       }
       case 'delete': {
-        // Natural-language delete → the same confirm-by-"yes" flow as /delete.
-        this.pendingDelete.set(chatId, route.slug);
-        await this.bot.api.editMessageText(
-          chatId, thinkingId,
-          `⚠️ Delete project *${route.slug}* together with its database and code? This cannot be undone.\n\nReply "yes" to confirm; anything else cancels.`,
-          { parse_mode: 'Markdown' },
-        ).catch(() => {});
+        // Natural-language delete → the same tap-to-confirm buttons as /delete,
+        // editing the "💭…" bubble into the confirm card.
+        const { text: body, kb } = this.deleteConfirm(route.slug);
+        await this.bot.api.editMessageText(chatId, thinkingId, body, {
+          parse_mode: 'Markdown', reply_markup: kb,
+        }).catch(() => {});
+        this.pendingDelete.set(chatId, { messageId: thinkingId, slug: route.slug });
         return;
       }
       case 'devops': {
@@ -839,6 +880,23 @@ export class TelegramGateway {
 
   private async deleteMessage(chatId: number, messageId: number): Promise<void> {
     await this.bot.api.deleteMessage(chatId, messageId).catch(() => {});
+  }
+
+  /** The irreversible-delete confirm card: warning text + tap buttons. Tap, not
+   *  type — so a stray "yes"/"да" can't delete and a natural "yes, delete it"
+   *  isn't silently lost. Shared by /delete and the natural-language delete. */
+  private deleteConfirm(slug: string): { text: string; kb: InlineKeyboard } {
+    return {
+      text: `⚠️ Delete project *${slug}* together with its database and code? This cannot be undone.`,
+      kb: new InlineKeyboard().text('🗑 Delete', 'delete:exec').text('✖️ Cancel', 'delete:cancel'),
+    };
+  }
+
+  /** Send a fresh delete-confirm card and remember it (messageId-guarded). */
+  private async promptDelete(ctx: Context, slug: string): Promise<void> {
+    const { text, kb } = this.deleteConfirm(slug);
+    const sent = await ctx.reply(text, { parse_mode: 'Markdown', reply_markup: kb });
+    this.pendingDelete.set(ctx.chat!.id, { messageId: sent.message_id, slug });
   }
 
   /** 🔍 Review one-tap: a read-only senior-engineer pass over the project.
@@ -986,7 +1044,7 @@ export class TelegramGateway {
       );
       finished = true;
       clearInterval(heartbeat);
-      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome);
+      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction });
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
       // A fresh build → connect to it, so the next message goes straight to the
       // new project and the persistent bar becomes its actions (the outcome
@@ -1006,18 +1064,30 @@ export class TelegramGateway {
     } catch (e) {
       clearInterval(heartbeat);
       finished = true;
-      await this.bot.api.editMessageText(
-        chatId, statusMsg.message_id, `${STAGE_LABELS.failed} — ${(e as Error).message}`,
-      ).catch(() => {});
+      await this.reportOutcome(
+        ctx, chatId, statusMsg.message_id,
+        { ok: false, slug: slug ?? '', error: (e as Error).message },
+        { kind, slug, instruction },
+      );
     }
   }
 
-  private async reportOutcome(ctx: Context, chatId: number, statusMsgId: number, o: TaskOutcome): Promise<void> {
+  private async reportOutcome(
+    ctx: Context, chatId: number, statusMsgId: number, o: TaskOutcome,
+    retry?: { kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string },
+  ): Promise<void> {
     if (!o.ok) {
-      await this.bot.api.editMessageText(
-        chatId, statusMsgId,
-        `❌ Failed on "${o.slug}":\n\n${(o.error ?? 'unknown error').slice(0, 3000)}`,
-      ).catch(() => {});
+      // Not a dead end: offer 🔁 Retry (re-runs the request) and 🩺 Doctor when
+      // the project actually exists, with a plain-language lead over trimmed logs.
+      const kb = new InlineKeyboard();
+      if (retry) {
+        kb.text('🔁 Retry', 'retry');
+        this.pendingRetry.set(chatId, { messageId: statusMsgId, ...retry });
+      }
+      if (o.slug && this.store.projectExists(o.slug)) kb.text('🩺 Doctor', `doctor:${o.slug}`);
+      await this.bot.api.editMessageText(chatId, statusMsgId, failureMessage(o), {
+        reply_markup: kb.inline_keyboard.flat().length ? kb : undefined,
+      }).catch(() => {});
       return;
     }
     const lines = [`✅ *${o.slug}* — deployed`];
