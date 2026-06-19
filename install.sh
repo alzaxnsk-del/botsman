@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Botsman installer for clean Ubuntu 22.04 / 24.04 (AC-A1).
-# Usage:  curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
+# Usage:  curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | sudo bash
 # Env:    BOTSMAN_REPO  — git URL of the botsman repo (default below)
 #         BOTSMAN_DIR   — install dir (default /opt/botsman)
 set -euo pipefail
@@ -26,6 +26,11 @@ divider(){ say "  ${D}───────────────────�
 say ""
 say "  ${A}◆${X} ${B}Botsman${X}"
 say "    ${D}Describe a service in chat — get it deployed on your own server.${X}"
+say ""
+say "    ${B}Before we start, have these two things ready:${X}"
+say "      • A Telegram bot token from @BotFather       ${D}(https://t.me/BotFather)${X}"
+say "      • Your numeric Telegram ID from @userinfobot  ${D}(https://t.me/userinfobot)${X}"
+say "    ${D}You'll paste them at the end — no need to leave this terminal until then.${X}"
 say ""
 divider
 
@@ -120,13 +125,17 @@ step 7 "Starting services"
 docker compose up -d --quiet-pull 2>/dev/null || docker compose up -d
 info "daemon + Caddy (HTTPS) + Postgres"
 HEALTHY=0
-for i in $(seq 1 30); do
+for i in $(seq 1 45); do
   if curl -fsS http://127.0.0.1:8366/health >/dev/null 2>&1; then HEALTHY=1; break; fi
   sleep 2
 done
 if [ "$HEALTHY" != "1" ]; then
   docker compose logs --tail 30 botsman || true
-  fail "The daemon did not answer the healthcheck within 60 seconds — see the logs above (docker compose logs botsman)."
+  fail "The daemon didn't answer the health check within 90 seconds — the build may still be settling.
+    Try, in order:
+      1) wait ~30s, then:  curl -fsS http://127.0.0.1:8366/health
+      2) watch the logs:   cd $BOTSMAN_DIR && docker compose logs -f botsman
+      3) re-run if needed: cd $BOTSMAN_DIR && docker compose up -d"
 fi
 ok "all services are up"
 

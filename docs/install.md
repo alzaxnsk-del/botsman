@@ -45,7 +45,7 @@ You need:
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | sudo bash
 ```
 
 The script, in one pass:
