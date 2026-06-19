@@ -132,6 +132,12 @@ export class OnboardingBot {
       }
     });
 
+    // Non-text during onboarding (e.g. a screenshot instead of a pasted token):
+    // acknowledge instead of silently ignoring it.
+    this.bot.on('message', async (ctx) => {
+      await ctx.reply('Please send it as text — paste the token/key or type the answer.');
+    });
+
     this.bot.catch((err) => logger.error('onboarding handler error', { error: String(err.error) }));
   }
 
