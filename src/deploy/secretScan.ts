@@ -29,6 +29,9 @@ const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'build']);
 const SKIP_FILES = new Set(['.env', 'package-lock.json']);
 // Template files hold placeholders by convention.
 const TEMPLATE_SUFFIX = /\.(example|sample|template|dist)$/i;
+// Binary assets (e.g. an attached reference image) — scanning their bytes as
+// UTF-8 is meaningless and risks a spurious match; skip by extension.
+const BINARY_SUFFIX = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif|ico|pdf|zip|gz|tgz|tar|woff2?|ttf|otf|eot|mp4|mov|webm|mp3|wav|ogg)$/i;
 
 /**
  * Obvious non-secret placeholders that must NOT be treated as a real password.
@@ -62,7 +65,7 @@ function walk(root: string, dir: string, findings: SecretFinding[]): void {
       if (!SKIP_DIRS.has(entry.name)) walk(root, path.join(dir, entry.name), findings);
       continue;
     }
-    if (!entry.isFile() || SKIP_FILES.has(entry.name) || TEMPLATE_SUFFIX.test(entry.name)) continue;
+    if (!entry.isFile() || SKIP_FILES.has(entry.name) || TEMPLATE_SUFFIX.test(entry.name) || BINARY_SUFFIX.test(entry.name)) continue;
     const full = path.join(dir, entry.name);
     let content: string;
     try {

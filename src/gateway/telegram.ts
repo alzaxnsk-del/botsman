@@ -25,7 +25,13 @@ import { failureMessage, withElapsed } from './format.js';
 import { localDevInstructions } from '../clone.js';
 import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
-import { MEMORY_FILE, type Orchestrator, type TaskOutcome } from '../orchestrator.js';
+import { MEMORY_FILE, type Orchestrator, type TaskOutcome, type TaskAttachment } from '../orchestrator.js';
+import {
+  isImage, extractDocText, buildDocInstruction, buildImageInstruction, imageFileName,
+  MAX_DOC_BYTES, MAX_IMAGE_BYTES,
+  docAcceptedMsg, docTooBigMsg, docBinaryMsg, imageAcceptedMsg, imageTooBigMsg,
+  downloadFailedMsg, voiceUnsupportedMsg, otherUnsupportedMsg,
+} from './ingest.js';
 import { versionLine } from '../version.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
@@ -70,14 +76,18 @@ export class TelegramGateway {
   private bot: Bot;
   /** project awaiting a tap-to-confirm /delete; messageId guards stale buttons. */
   private pendingDelete = new Map<number, { messageId: number; slug: string }>();
-  /** free text awaiting "new or edit?" disambiguation, keyed by chat; messageId guards stale buttons. */
-  private pendingAmbiguous = new Map<number, { messageId: number; text: string }>();
+  /** free text awaiting "new or edit?" disambiguation, keyed by chat; messageId guards stale buttons.
+   *  Carries an optional attachment so an image disambiguation still delivers the file. */
+  private pendingAmbiguous = new Map<number, { messageId: number; text: string; attachment?: TaskAttachment }>();
   /** DevOps op awaiting a confirm button; messageId guards stale clicks. */
   private pendingDevOps = new Map<number, { messageId: number; op: DevOpsOp; confirmed: boolean }>();
-  /** A failed task offering a 🔁 Retry; messageId guards stale buttons. */
-  private pendingRetry = new Map<number, { messageId: number; kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string }>();
+  /** A failed task offering a 🔁 Retry; messageId guards stale buttons. Keeps the
+   *  attachment so a retried image build re-delivers the reference file. */
+  private pendingRetry = new Map<number, { messageId: number; kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachment?: TaskAttachment }>();
   /** Cancel fns for still-queued tasks, keyed by their status message id (🚫 Cancel). */
   private pendingTaskCancel = new Map<number, () => boolean>();
+  /** media_group ids seen recently, so an album (N photos = N updates) doesn't spawn N tasks. */
+  private seenMediaGroups = new Map<string, number>();
   /** Chats with a 🔍 Review agent run in flight — debounces repeated taps. */
   private reviewing = new Set<number>();
 
@@ -507,7 +517,7 @@ export class TelegramGateway {
         }
         this.pendingRetry.delete(chatId);
         await ctx.answerCallbackQuery({ text: 'Retrying…' });
-        return void this.runTask(entry.kind, entry.slug, entry.instruction, ctx);
+        return void this.runTask(entry.kind, entry.slug, entry.instruction, ctx, entry.attachment);
       }
 
       // 🚫 Cancel a still-queued task. Keyed by the status message's id; a no-op
@@ -540,9 +550,9 @@ export class TelegramGateway {
       }
       this.pendingAmbiguous.delete(chatId);
       if (data === 'intent:new') {
-        await this.runTask('create', undefined, pending.text, ctx);
+        await this.runTask('create', undefined, pending.text, ctx, pending.attachment);
       } else if (data.startsWith('intent:edit:')) {
-        await this.runTask('edit', data.slice('intent:edit:'.length), pending.text, ctx);
+        await this.runTask('edit', data.slice('intent:edit:'.length), pending.text, ctx, pending.attachment);
       }
     });
 
@@ -593,14 +603,18 @@ export class TelegramGateway {
       return this.handleMessage(ctx, text);
     });
 
-    // Any NON-text message (photo / voice / document / sticker / video / …):
-    // acknowledge it so "just talk" never meets silence. message:text above
-    // handles text and stops propagation, so this only fires for non-text.
+    // Attachments: a text DOCUMENT (a spec to build from) and an IMAGE (a UI
+    // mockup or a bug screenshot) are real inputs, routed through the SAME
+    // create/edit/question pipeline as typed text. These specific filters must be
+    // registered BEFORE the generic catch-all (grammy stops at the first match).
+    this.bot.on('message:document', (ctx) => this.handleDocument(ctx));
+    this.bot.on('message:photo', (ctx) => this.handlePhoto(ctx));
+    // Anything still unhandled (voice / video / sticker / …): acknowledge it so
+    // "just talk" never meets silence, and say what IS supported.
     this.bot.on('message', async (ctx) => {
-      await ctx.reply(
-        "I can only read text right now — describe what you need in words. " +
-        "(Photos, voice notes and files aren't supported yet.)",
-      );
+      const m = ctx.message;
+      const isVoice = !!(m?.voice || m?.audio || m?.video_note);
+      await ctx.reply(isVoice ? voiceUnsupportedMsg : otherUnsupportedMsg);
     });
 
     this.bot.catch((err) => logger.error('telegram handler error', { error: String(err.error) }));
@@ -763,11 +777,11 @@ export class TelegramGateway {
    * (fuzzy/transliterated name match), then the rest, so "improve X" is one tap.
    * `thinkingId` is an existing "💭…" message to edit, or null to send fresh.
    */
-  private async createOrAsk(ctx: Context, description: string, slugs: string[], thinkingId: number | null): Promise<void> {
+  private async createOrAsk(ctx: Context, description: string, slugs: string[], thinkingId: number | null, attachment?: TaskAttachment): Promise<void> {
     const chatId = ctx.chat!.id;
     if (slugs.length === 0) {
       if (thinkingId) await this.deleteMessage(chatId, thinkingId);
-      return void this.runTask('create', undefined, description, ctx);
+      return void this.runTask('create', undefined, description, ctx, attachment);
     }
     const similar = findSimilarProject(description, slugs);
     const ordered = similar ? [similar, ...slugs.filter((s) => s !== similar)] : slugs;
@@ -792,10 +806,10 @@ export class TelegramGateway {
       (similar ? `\nThis looks related to ${similar}.` : '') + more;
     if (thinkingId) {
       await this.bot.api.editMessageText(chatId, thinkingId, body, { reply_markup: kb }).catch(() => {});
-      this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: description });
+      this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: description, attachment });
     } else {
       const sent = await ctx.reply(body, { reply_markup: kb });
-      this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text: description });
+      this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text: description, attachment });
     }
   }
 
@@ -1049,12 +1063,115 @@ export class TelegramGateway {
     }
   }
 
+  /** Download a Telegram file by id into a Buffer. The bot token is in the URL,
+   *  so it must never be logged. */
+  private async downloadTgFile(fileId: string): Promise<Buffer> {
+    const file = await this.bot.api.getFile(fileId);
+    if (!file.file_path) throw new Error('no file_path');
+    const res = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`);
+    if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  /** First photo of an album returns true; the rest of the same media_group are
+   *  dropped, so sending N screenshots at once doesn't spawn N projects/edits. */
+  private firstOfMediaGroup(id?: string): boolean {
+    if (!id) return true;
+    const now = Date.now();
+    for (const [k, t] of this.seenMediaGroups) if (now - t > 60_000) this.seenMediaGroups.delete(k);
+    if (this.seenMediaGroups.has(id)) return false;
+    this.seenMediaGroups.set(id, now);
+    return true;
+  }
+
+  /** Route an attachment-derived task. The agent payload (doc body / image ref)
+   *  is decided here, but the create-vs-edit TARGET is read from the CAPTION only
+   *  (never the payload) — so a slug mentioned inside a 15 KB spec can't silently
+   *  retarget, and the body never enters the router prompt. Connected → edit;
+   *  otherwise create-or-confirm via createOrAsk (which carries the attachment). */
+  private async routeAttachment(ctx: Context, caption: string | undefined, payload: string, attachment?: TaskAttachment): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const focused = getFocus(this.store, chatId);
+    if (focused) return void this.runTask('edit', focused, payload, ctx, attachment);
+    const slugs = this.store.listProjects().map((p) => p.slug);
+    const cap = (caption ?? '').trim();
+    if (cap) {
+      const intent = detectIntent(cap, slugs, null); // null: don't auto-target via stale last_active
+      if (intent.kind === 'edit') return void this.runTask('edit', intent.slug, payload, ctx, attachment);
+    }
+    // create (explicit, or no caption) → confirm against existing projects when
+    // any exist (mirrors the typed-text path); builds straight away if none.
+    await this.createOrAsk(ctx, payload, slugs, null, attachment);
+  }
+
+  /** A document attachment: an image-as-file becomes an image; a text spec is
+   *  decoded and routed like a typed request; anything else is refused. */
+  private async handleDocument(ctx: Context): Promise<void> {
+    const doc = ctx.message?.document;
+    if (!doc) return;
+    const name = doc.file_name ?? 'document';
+    const caption = ctx.message?.caption;
+    if (isImage(name, doc.mime_type)) {
+      if (!this.firstOfMediaGroup(ctx.message?.media_group_id)) return;
+      return void this.handleImage(ctx, doc.file_id, doc.file_size ?? 0, name, doc.mime_type, caption);
+    }
+    if ((doc.file_size ?? 0) > MAX_DOC_BYTES) return void ctx.reply(docTooBigMsg(name, doc.file_size!));
+    let bytes: Buffer;
+    try {
+      bytes = await this.downloadTgFile(doc.file_id);
+    } catch (e) {
+      logger.warn('document download failed', { error: String((e as Error).message) });
+      return void ctx.reply(downloadFailedMsg);
+    }
+    const res = extractDocText(bytes, name, doc.mime_type);
+    if (!res.ok) {
+      return void ctx.reply(res.reason === 'too_big' ? docTooBigMsg(name, bytes.length) : docBinaryMsg(name));
+    }
+    await ctx.reply(docAcceptedMsg(name, bytes.length));
+    await this.routeAttachment(ctx, caption, buildDocInstruction({ caption, body: res.text, name }));
+  }
+
+  /** A compressed photo: pick the largest size and treat it as a reference image. */
+  private async handlePhoto(ctx: Context): Promise<void> {
+    if (!this.firstOfMediaGroup(ctx.message?.media_group_id)) return;
+    const sizes = ctx.message?.photo;
+    if (!sizes?.length) return;
+    const largest = sizes[sizes.length - 1]; // PhotoSize[] is ascending by resolution
+    await this.handleImage(ctx, largest.file_id, largest.file_size ?? 0, 'photo.jpg', 'image/jpeg', ctx.message?.caption);
+  }
+
+  /** Deliver an image to the agent: download it, write it into the project dir
+   *  (visible at /work) and reference it in the instruction. Connected project →
+   *  edit it; otherwise route as a create (confirmed against existing projects). */
+  private async handleImage(
+    ctx: Context, fileId: string, size: number, name: string, mime: string | undefined, caption?: string,
+  ): Promise<void> {
+    if (size > MAX_IMAGE_BYTES) return void ctx.reply(imageTooBigMsg);
+    let bytes: Buffer;
+    try {
+      bytes = await this.downloadTgFile(fileId);
+    } catch (e) {
+      logger.warn('image download failed', { error: String((e as Error).message) });
+      return void ctx.reply(downloadFailedMsg);
+    }
+    if (bytes.length > MAX_IMAGE_BYTES) return void ctx.reply(imageTooBigMsg);
+    const fileRef = imageFileName(name, mime);
+    const attachment: TaskAttachment = { name: fileRef, bytes };
+    const connected = getFocus(this.store, ctx.chat!.id);
+    if (connected) {
+      await ctx.reply(imageAcceptedMsg(connected));
+      return void this.runTask('edit', connected, buildImageInstruction({ caption, fileRef, mode: 'edit' }), ctx, attachment);
+    }
+    await this.routeAttachment(ctx, caption, buildImageInstruction({ caption, fileRef, mode: 'create' }), attachment);
+  }
+
   /** Run a long task with a live-updating status message + 30s heartbeat. */
   private async runTask(
     kind: 'create' | 'resume' | 'edit' | 'rollback',
     slug: string | undefined,
     instruction: string,
     ctx: Context,
+    attachment?: TaskAttachment,
   ): Promise<void> {
     const chatId = ctx.chat!.id;
     // When something is already running, this task WAITS — say so clearly and
@@ -1133,11 +1250,12 @@ export class TelegramGateway {
         slug,
         // Register the cancel fn only while queued; the button uses it by messageId.
         (cancel) => { if (wasQueued) this.pendingTaskCancel.set(statusMsg.message_id, cancel); },
+        attachment,
       );
       finished = true;
       stopTicks();
       this.pendingTaskCancel.delete(statusMsg.message_id);
-      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction });
+      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction, attachment });
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
       // A fresh build → connect to it, so the next message goes straight to the
       // new project and the persistent bar becomes its actions (the outcome
@@ -1161,14 +1279,14 @@ export class TelegramGateway {
       await this.reportOutcome(
         ctx, chatId, statusMsg.message_id,
         { ok: false, slug: slug ?? '', error: (e as Error).message },
-        { kind, slug, instruction },
+        { kind, slug, instruction, attachment },
       );
     }
   }
 
   private async reportOutcome(
     ctx: Context, chatId: number, statusMsgId: number, o: TaskOutcome,
-    retry?: { kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string },
+    retry?: { kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachment?: TaskAttachment },
   ): Promise<void> {
     if (o.cancelled) {
       // Cancelled while queued — never ran, so no Retry/Doctor card, just a
