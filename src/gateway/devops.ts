@@ -262,7 +262,7 @@ export function summarize(op: DevOpsOpId, slug?: string): string {
     case 'rollback_service': return `Roll ${slug} back to the previous version`;
     case 'restart_proxy': return 'Restart the reverse proxy (re-issues TLS)';
     case 'prune_docker': return 'Reclaim docker disk space';
-    case 'self_update': return '⚠️ Update Botsman from git and restart it (I will be back in ~30s)';
+    case 'self_update': return '⚠️ Update Botsman from git and restart it (I should be back in ~30–60s)';
     case 'host_update': return '⚠️ Update the host OS packages (apt upgrade) — this changes the server';
   }
 }
