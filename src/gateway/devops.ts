@@ -120,7 +120,7 @@ export interface DevOpsDeps {
 // Liberal on purpose: a false positive only costs one LLM call (the router
 // then re-classifies correctly); a false NEGATIVE is dangerous because it lets
 // the no-LLM fast-path auto-deploy an op as a code edit. So over-match.
-const OP_VERBS = /(^|\s)(restart|reboot|redeploy|re-?deploy|rebuild|roll\s?back|logs?|metrics|load|cpu|ram|memory|disk|doctor|diagnose|prune|clean\s?up|update|upgrade|stop|kill|pause|shut\s?down|take\s?down|turn\s?off|bounce|disable|status|перезапус|перезагруз|передепло|пересобер|откат|логи?|нагрузк|памят|диск|диагност|очист|обнов|останов|выключ|пауз|статус)/i;
+const OP_VERBS = /(^|\s)(restart|reboot|redeploy|re-?deploy|rebuild|roll\s?back|logs?|metrics|load|cpu|ram|memory|disk|doctor|diagnose|prune|clean\s?up|recycle|update|upgrade|stop|kill|pause|shut\s?down|take\s?down|turn\s?off|bounce|disable|status|рестарт|ребут|перезапус|перезагруз|передепло|пересобер|пересобр|откат|логи?|нагрузк|памят|диск|диагност|очист|обнов|апдейт|апгрейд|останов|выключ|пауз|статус)/i;
 const PROXY_TLS = /(proxy|tls|ssl|cert|сертификат|прокси)/i;
 
 export function looksOperational(text: string): boolean {
@@ -150,6 +150,7 @@ Actions:
     restart_proxy, prune_docker (reclaim disk), self_update (update Botsman), host_update (apt upgrade).
 
 Rules:
+- The message may be in RUSSIAN or English, or transliterated/abbreviated Russian (e.g. «перезапусти todo» = restart, «обнови» = update, «удали X» = delete, «как это работает?» = a question). Classify it identically regardless of language; never let a non-English message default to {"kind":"none"} just because it is Russian.
 - Pick the single best action. Copy a referenced project slug EXACTLY from the list.
 - A message about fixing, reviewing, improving, or reporting a problem ("it's broken", "crashes", "white screen", "works poorly") with an EXISTING service is an EDIT (or question) of THAT service — NOT a new project. Choose "create" ONLY for a clearly new, different service.
 - Project references may be fuzzy or transliterated — e.g. «тамагочи» / "tamagochi" refers to an existing "tamagotchi-web-app". Match the message to the closest existing project before considering create.
@@ -394,7 +395,7 @@ function cpuPercent(s: DockerStats): number {
  */
 // Liberal like looksOperational: false positives are harmless (→ LLM router),
 // false negatives let a question fast-path into an unwanted code edit.
-const QUESTION_START = /^(how|what|why|when|where|which|who|does|do|is|are|can|could|would|should|tell me|explain|show me|describe|walk me through|как|что|почему|зачем|когда|где|какой|какая|сколько|умеет|правда|расскажи|объясни|покажи|опиши)/i;
+const QUESTION_START = /^(how|what|why|when|where|which|who|does|do|is|are|can|could|would|should|tell me|explain|show me|describe|walk me through|как|что|почему|зачем|когда|где|какой|какая|какие|какое|каком|каким|какую|кто|сколько|умеет|правда|расскажи|объясни|покажи|опиши)/i;
 
 export function looksLikeQuestion(text: string): boolean {
   const t = text.trim();
