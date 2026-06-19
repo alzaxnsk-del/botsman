@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   routeMessage, looksOperational, looksLikeQuestion, OP_META, summarize,
-  runDevOpsConfirm, type ConfirmIO, type PendingDevOps, type DevOpsOp,
+  runDevOpsConfirm, runMutatingOp, type ConfirmIO, type PendingDevOps, type DevOpsOp, type DevOpsDeps,
 } from '../src/gateway/devops.js';
 import type { StructuredLlm } from '../src/llm.js';
+import { Store } from '../src/db.js';
+import { RESTART_NOTICE_KEY } from '../src/types.js';
 
 /** A StructuredLlm stub that returns the given object (after validation). */
 function stubLlm(reply: unknown): StructuredLlm {
@@ -200,5 +202,49 @@ describe('runDevOpsConfirm (host-op double-confirm state machine)', () => {
     await runDevOpsConfirm(entry, 'devops:exec', io);
     expect(calls.warned).toBe(0);
     expect(calls.executed).toBe(1);
+  });
+});
+
+type UpdResult = { ok: boolean; output: string; timedOut: boolean; exitCode: number };
+function depsWithSelfUpdate(selfUpdate: () => Promise<UpdResult>): { store: Store; deps: DevOpsDeps } {
+  const store = new Store(':memory:');
+  const deps = {
+    store,
+    docker: {}, deployEngine: {}, orchestrator: {},
+    hostExec: { selfUpdate },
+    hostRepoDir: '/opt/botsman',
+  } as unknown as DevOpsDeps;
+  return { store, deps };
+}
+
+describe('runMutatingOp self_update (messaging + back-online notice)', () => {
+  const op = { op: 'self_update', mutating: true, hostLevel: true, humanSummary: '' } as DevOpsOp;
+
+  it('says "already up to date" and clears the notice when nothing is new (BOTSMAN_NOOP)', async () => {
+    const { store, deps } = depsWithSelfUpdate(async () => ({ ok: true, output: 'BOTSMAN_NOOP', timedOut: false, exitCode: 0 }));
+    const msg = await runMutatingOp(op, deps);
+    expect(msg).toContain('up to date');
+    expect(store.kvGet(RESTART_NOTICE_KEY)).toBe(''); // no restart promised
+  });
+
+  it('promises a restart and keeps the back-online notice on a real update', async () => {
+    const { store, deps } = depsWithSelfUpdate(async () => ({ ok: true, output: 'built', timedOut: false, exitCode: 0 }));
+    const msg = await runMutatingOp(op, deps);
+    expect(msg).toContain('recreating');
+    expect(store.kvGet(RESTART_NOTICE_KEY)).toContain('back online');
+  });
+
+  it('surfaces a build/git failure and clears the notice', async () => {
+    const { store, deps } = depsWithSelfUpdate(async () => ({ ok: false, output: 'docker build: boom', timedOut: false, exitCode: 1 }));
+    const msg = await runMutatingOp(op, deps);
+    expect(msg).toContain('failed');
+    expect(store.kvGet(RESTART_NOTICE_KEY)).toBe('');
+  });
+
+  it('distinguishes a timeout from a failure', async () => {
+    const { store, deps } = depsWithSelfUpdate(async () => ({ ok: false, output: '', timedOut: true, exitCode: -1 }));
+    const msg = await runMutatingOp(op, deps);
+    expect(msg).toContain('timed out');
+    expect(store.kvGet(RESTART_NOTICE_KEY)).toBe('');
   });
 });
