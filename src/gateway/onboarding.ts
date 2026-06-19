@@ -46,6 +46,12 @@ export class OnboardingBot {
     return updateConfigFile({});
   }
 
+  /** A /setup re-config (a backup exists) touches ONE field — don't greet a
+   *  returning owner as a brand-new install with "Step n of 4". */
+  private heading(step: string, title: string): string {
+    return this.store.kvGet(SETUP_BACKUP_KEY) ? `*Update · ${title}*` : `*${step} · ${title}*`;
+  }
+
   private wire(): void {
     this.bot.use(async (ctx, next) => {
       if (!ctx.from || !this.ownerIds.includes(ctx.from.id)) {
@@ -191,7 +197,7 @@ export class OnboardingBot {
         .text('💳 Anthropic API key', 'auth:api');
       this.addCancel(kb);
       await ctx.reply(
-        '*Step 1 of 4 · Coding agent*\n\n' +
+        this.heading('Step 1 of 4', 'Coding agent') + '\n\n' +
         'How should I power code generation?\n\n' +
         '🔑 *Claude subscription* (Pro/Max) — no extra API bills; uses your plan limits, ' +
         'which heavy building can burn through fast, especially on Opus.\n' +
@@ -207,7 +213,7 @@ export class OnboardingBot {
       const kb = new InlineKeyboard();
       const hasCancel = this.addCancel(kb);
       await ctx.reply(
-        '*Step 3 of 4 · Domain*\n\n' +
+        this.heading('Step 3 of 4', 'Domain') + '\n\n' +
         'Send me the base domain for your services, e.g. `example.com`.\n' +
         'Every project gets its own subdomain: `todo.example.com`.\n\n' +
         'First create a wildcard A-record at your DNS provider:\n' +
@@ -225,7 +231,7 @@ export class OnboardingBot {
       this.awaiting = 'telemetry';
       const kb = new InlineKeyboard().text('Yes, allow', 'telemetry:yes').text('No, keep off', 'telemetry:no');
       await ctx.reply(
-        '*Step 4 of 4 · Anonymous telemetry*\n\n' +
+        this.heading('Step 4 of 4', 'Anonymous telemetry') + '\n\n' +
         'May I send three anonymous lifecycle pings — installed / first deploy / returned after a week? ' +
         'Never code, prompts or project content. Off by default.',
         { parse_mode: 'Markdown', reply_markup: kb },
@@ -278,7 +284,7 @@ export class OnboardingBot {
     const kb = new InlineKeyboard();
     for (const m of MODEL_CHOICES) kb.text(m.label, `model:${m.id}`).row();
     await ctx.reply(
-      '*Step 2 of 4 · Model*\n\n' +
+      this.heading('Step 2 of 4', 'Model') + '\n\n' +
       'Which model should write your code?\n\n' +
       MODEL_CHOICES.map((m) => `${m.label} — ${m.blurb}`).join('\n') +
       '\n\n_Recommended: 🏆 Opus for the best results. Change it anytime with /setup._',

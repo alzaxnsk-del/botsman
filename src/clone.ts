@@ -35,11 +35,13 @@ export function cloneUrl(opts: { slug: string; hostHome: string; host: string })
 /** The local-dev guide for one project, as a single Telegram message. */
 export function localDevInstructions(info: CloneInfo): string {
   const url = cloneUrl(info);
+  const user = inferSshUser(info.hostHome);
   // Keep the inferred username OUT of the prose (only inside the code fence) so
   // an underscore in a Linux username can't trip Markdown parsing.
-  const userNote = inferSshUser(info.hostHome) === '<user>'
+  const userNote = user === '<user>'
     ? '\nReplace <user> with your SSH login on the server.'
     : '\n(Using your detected install user — change it if your SSH login differs.)';
+  const hostNote = info.host === '<server>' ? "\nReplace <server> with your server's IP or hostname." : '';
   return [
     `💻 Develop ${info.slug} on your computer with Claude Code:`,
     '',
@@ -49,6 +51,12 @@ export function localDevInstructions(info: CloneInfo): string {
     '# make changes, then:',
     'git push   # auto-deploys',
     '```',
-    `Your changes go live at https://${info.domain}/ after each push.${userNote}`,
+    `After each \`git push\` I rebuild and deploy it, then reply right here with the result.`,
+    `It stays live at https://${info.domain}/.${userNote}${hostNote}`,
+    '',
+    'First time? If `git clone` says *Permission denied (publickey)*, add your key once:',
+    '```',
+    `ssh-copy-id ${user}@${info.host}`,
+    '```',
   ].join('\n');
 }
