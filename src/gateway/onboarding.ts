@@ -28,6 +28,9 @@ export class OnboardingBot {
   /** Domain that failed the DNS probe, awaiting "re-check" or "use anyway". */
   private pendingDomain: string | null = null;
   private telemetryAsked = false;
+  /** A button-only step is on screen (model / telemetry) — so typed text doesn't
+   *  silently skip the choice. Cleared once the matching button is tapped. */
+  private awaiting: 'model' | 'telemetry' | null = null;
 
   constructor(
     private token: string,
@@ -93,14 +96,20 @@ export class OnboardingBot {
           break;
         case 'dns:force':
           if (this.pendingDomain) {
-            updateConfigFile({ baseDomain: this.pendingDomain });
+            const forced = this.pendingDomain;
+            updateConfigFile({ baseDomain: forced });
             this.pendingDomain = null;
-            await ctx.reply('Saved. Remember: links and TLS will not work until the DNS record exists.');
+            await ctx.reply(
+              `Saved \`${forced}\`. ⚠️ Until \`*.${forced}\` resolves to this server, project links and HTTPS will fail. ` +
+              'Once the wildcard DNS record is live, re-verify any time with /setup → 🌐 Domain.',
+              { parse_mode: 'Markdown' },
+            );
             await this.advance(ctx);
           }
           break;
         case 'telemetry:yes':
         case 'telemetry:no': {
+          this.awaiting = null;
           const enabled = data === 'telemetry:yes';
           const prev = this.config();
           updateConfigFile({ telemetry: { ...prev.telemetry, enabled } });
@@ -112,6 +121,7 @@ export class OnboardingBot {
           if (data.startsWith('model:')) {
             const id = data.slice('model:'.length);
             if (!isModelId(id)) break;
+            this.awaiting = null;
             const prev = this.config();
             updateConfigFile({ agent: { ...prev.agent, model: id } });
             await ctx.reply(`✓ ${modelLabel(id)} will write your code.`);
@@ -128,7 +138,12 @@ export class OnboardingBot {
         case 'oauth': return this.handleOauthToken(ctx, text);
         case 'apikey': return this.handleApiKey(ctx, text);
         case 'domain': return this.tryDomain(ctx, text.toLowerCase());
-        default: return this.advance(ctx);
+        default:
+          // A button-only step is showing — typing "opus" / "yes" would skip it
+          // silently. Nudge to tap instead of advancing past the choice.
+          if (this.awaiting === 'model') return void ctx.reply('Tap one of the model buttons above to choose.');
+          if (this.awaiting === 'telemetry') return void ctx.reply('Tap "Yes, allow" or "No, keep off" above.');
+          return this.advance(ctx);
       }
     });
 
@@ -176,10 +191,12 @@ export class OnboardingBot {
         .text('💳 Anthropic API key', 'auth:api');
       this.addCancel(kb);
       await ctx.reply(
-        '*Step 1 of 3 · Coding agent*\n\n' +
+        '*Step 1 of 4 · Coding agent*\n\n' +
         'How should I power code generation?\n\n' +
-        '🔑 *Claude subscription* (Pro/Max) — no extra API bills, uses your plan limits.\n' +
-        '💳 *Anthropic API key* — pay-per-use.',
+        '🔑 *Claude subscription* (Pro/Max) — no extra API bills; uses your plan limits, ' +
+        'which heavy building can burn through fast, especially on Opus.\n' +
+        '💳 *Anthropic API key* — pay-per-use.\n\n' +
+        '_You can switch this anytime with /setup._',
         { parse_mode: 'Markdown', reply_markup: kb },
       );
       return;
@@ -190,7 +207,7 @@ export class OnboardingBot {
       const kb = new InlineKeyboard();
       const hasCancel = this.addCancel(kb);
       await ctx.reply(
-        '*Step 2 of 3 · Domain*\n\n' +
+        '*Step 3 of 4 · Domain*\n\n' +
         'Send me the base domain for your services, e.g. `example.com`.\n' +
         'Every project gets its own subdomain: `todo.example.com`.\n\n' +
         'First create a wildcard A-record at your DNS provider:\n' +
@@ -205,9 +222,10 @@ export class OnboardingBot {
     if (!this.telemetryAsked) {
       this.telemetryAsked = true;
       this.expecting = null;
+      this.awaiting = 'telemetry';
       const kb = new InlineKeyboard().text('Yes, allow', 'telemetry:yes').text('No, keep off', 'telemetry:no');
       await ctx.reply(
-        '*Step 3 of 3 · Anonymous telemetry*\n\n' +
+        '*Step 4 of 4 · Anonymous telemetry*\n\n' +
         'May I send three anonymous lifecycle pings — installed / first deploy / returned after a week? ' +
         'Never code, prompts or project content. Off by default.',
         { parse_mode: 'Markdown', reply_markup: kb },
@@ -219,7 +237,7 @@ export class OnboardingBot {
 
   private async handleOauthToken(ctx: Context, raw: string): Promise<void> {
     const token = raw.replace(/\s+/g, '');
-    await this.deleteUserMessage(ctx);
+    const deleted = await this.deleteUserMessage(ctx);
     if (!/^sk-ant-oat/.test(token)) {
       await ctx.reply('That does not look like a `claude setup-token` value (must start with sk-ant-oat). Try again.', { parse_mode: 'Markdown' });
       return;
@@ -233,13 +251,13 @@ export class OnboardingBot {
     updateConfigFile({ claudeCodeOauthToken: token, anthropicApiKey: undefined });
     this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.expecting = null;
-    await this.edit(ctx, probeMsg.message_id, '✓ Token works — usage counts against your subscription limits. Your message with the token has been deleted.');
+    await this.edit(ctx, probeMsg.message_id, `✓ Token works — usage counts against your subscription limits.${this.deletedNote(deleted)}`);
     await this.askModel(ctx);
   }
 
   private async handleApiKey(ctx: Context, raw: string): Promise<void> {
     const key = raw.replace(/\s+/g, '');
-    await this.deleteUserMessage(ctx);
+    const deleted = await this.deleteUserMessage(ctx);
     const probeMsg = await ctx.reply('Checking the key…');
     const probe = await checkAnthropicKey(key);
     if (!probe.ok) {
@@ -249,17 +267,19 @@ export class OnboardingBot {
     updateConfigFile({ anthropicApiKey: key, claudeCodeOauthToken: undefined });
     this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.expecting = null;
-    await this.edit(ctx, probeMsg.message_id, '✓ Key works. Your message with the key has been deleted.');
+    await this.edit(ctx, probeMsg.message_id, `✓ Key works.${this.deletedNote(deleted)}`);
     await this.askModel(ctx);
   }
 
   /** Part of the "coding agent" step: pick the model that writes the code. */
   private async askModel(ctx: Context): Promise<void> {
     this.expecting = null;
+    this.awaiting = 'model';
     const kb = new InlineKeyboard();
     for (const m of MODEL_CHOICES) kb.text(m.label, `model:${m.id}`).row();
     await ctx.reply(
-      '*Which model should write your code?*\n\n' +
+      '*Step 2 of 4 · Model*\n\n' +
+      'Which model should write your code?\n\n' +
       MODEL_CHOICES.map((m) => `${m.label} — ${m.blurb}`).join('\n') +
       '\n\n_Recommended: 🏆 Opus for the best results. Change it anytime with /setup._',
       { parse_mode: 'Markdown', reply_markup: kb },
@@ -322,12 +342,21 @@ export class OnboardingBot {
     setTimeout(() => process.exit(0), 1500); // restart policy brings us back in full mode
   }
 
-  private async deleteUserMessage(ctx: Context): Promise<void> {
+  /** Delete the user's secret-bearing message. Returns whether it actually went
+   *  away, so we never claim "deleted" when it's still sitting in chat history. */
+  private async deleteUserMessage(ctx: Context): Promise<boolean> {
     try {
       await ctx.deleteMessage();
+      return true;
     } catch {
-      await ctx.reply('⚠️ I could not delete your message — please delete it manually (it contains a secret).').catch(() => {});
+      await ctx.reply('⚠️ I could not delete your message — please delete it yourself; it contains a secret.').catch(() => {});
+      return false;
     }
+  }
+
+  /** Honest trailing note for the success message based on whether we deleted it. */
+  private deletedNote(deleted: boolean): string {
+    return deleted ? ' Your message with it has been deleted.' : '';
   }
 
   private async edit(ctx: Context, messageId: number, text: string): Promise<void> {
