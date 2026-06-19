@@ -43,5 +43,14 @@ describe('localDevInstructions', () => {
     });
     expect(text).toContain('<user>@<server>');
     expect(text).toContain('Replace <user> with your SSH login');
+    expect(text).toContain('Replace <server>');
+  });
+
+  it('teaches SSH-key setup and that deploy results come back in this chat', () => {
+    const text = localDevInstructions({
+      slug: 'todo', hostHome: '/root/.botsman', host: '203.0.113.7', domain: 'todo.example.com',
+    });
+    expect(text).toContain('ssh-copy-id root@203.0.113.7'); // the missing-prereq fix
+    expect(text).toMatch(/reply right here/i);              // results come back in chat
   });
 });
