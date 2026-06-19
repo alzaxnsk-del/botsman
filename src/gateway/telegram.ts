@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../logger.js';
 import { paths } from '../paths.js';
-import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject } from '../intent.js';
+import { detectIntent, looksLikeCreate, looksLikeDelete, planCreate } from '../intent.js';
 import { isValidSlug } from '../slug.js';
 import { runDoctor, serverPublicIp, type FixId } from '../doctor.js';
 import { updateConfigFile } from '../config.js';
@@ -462,17 +462,7 @@ export class TelegramGateway {
       }
 
       await ctx.answerCallbackQuery();
-      const pending = this.pendingAmbiguous.get(chatId);
-      // A click on an outdated question must not apply the latest text.
-      if (!pending || pending.messageId !== ctx.callbackQuery.message?.message_id) {
-        return void ctx.reply('This button is stale — send your request again.');
-      }
-      this.pendingAmbiguous.delete(chatId);
-      if (data === 'intent:new') {
-        await this.runTask('create', undefined, pending.text, ctx);
-      } else if (data.startsWith('intent:edit:')) {
-        await this.runTask('edit', data.slice('intent:edit:'.length), pending.text, ctx);
-      }
+      await this.applyIntentChoice(ctx, chatId, data, ctx.callbackQuery.message?.message_id);
     });
 
     // Focus shortcuts (same logic as the persistent keyboard buttons).
@@ -705,28 +695,48 @@ export class TelegramGateway {
    */
   private async createOrAsk(ctx: Context, description: string, slugs: string[], thinkingId: number | null): Promise<void> {
     const chatId = ctx.chat!.id;
-    if (slugs.length === 0) {
+    const plan = planCreate(description, slugs);
+    if (plan.build) {
       if (thinkingId) await this.deleteMessage(chatId, thinkingId);
       return void this.runTask('create', undefined, description, ctx);
     }
-    const similar = findSimilarProject(description, slugs);
-    const ordered = similar ? [similar, ...slugs.filter((s) => s !== similar)] : slugs;
-    const shown = ordered.slice(0, 6); // keep the keyboard sane for many projects
     const kb = new InlineKeyboard().text('🆕 New project', 'intent:new').row();
-    for (const s of shown) kb.text(`✏️ ${s}`, `intent:edit:${s}`).row();
+    for (const s of plan.shown) kb.text(`✏️ ${s}`, `intent:edit:${s}`).row();
     // Plain text (no Markdown): the description is arbitrary user text.
     const desc = description.length > 80 ? description.slice(0, 79) + '…' : description;
-    const more = ordered.length > shown.length ? "\n(or type a project's name to change it)" : '';
+    const more = plan.hasMore ? "\n(or type a project's name to change it)" : '';
     const body =
       `You have ${slugs.length} project${slugs.length === 1 ? '' : 's'}. ` +
       `Make a NEW one for "${desc}", or improve an existing project?` +
-      (similar ? `\nThis looks related to ${similar}.` : '') + more;
+      (plan.similar ? `\nThis looks related to ${plan.similar}.` : '') + more;
     if (thinkingId) {
       await this.bot.api.editMessageText(chatId, thinkingId, body, { reply_markup: kb }).catch(() => {});
       this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: description });
     } else {
       const sent = await ctx.reply(body, { reply_markup: kb });
       this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text: description });
+    }
+  }
+
+  /**
+   * Apply a tapped "🆕 New project" / "✏️ <slug>" disambiguation button. The
+   * stale-guard rejects a tap whose message no longer matches the pending
+   * question (e.g. an older button left on screen), so a click can never apply
+   * the wrong text. Extracted from the callback handler so it's unit-testable.
+   */
+  private async applyIntentChoice(
+    ctx: Context, chatId: number, data: string, fromMessageId: number | undefined,
+  ): Promise<void> {
+    const pending = this.pendingAmbiguous.get(chatId);
+    if (!pending || pending.messageId !== fromMessageId) {
+      await ctx.reply('This button is stale — send your request again.');
+      return;
+    }
+    this.pendingAmbiguous.delete(chatId);
+    if (data === 'intent:new') {
+      await this.runTask('create', undefined, pending.text, ctx);
+    } else if (data.startsWith('intent:edit:')) {
+      await this.runTask('edit', data.slice('intent:edit:'.length), pending.text, ctx);
     }
   }
 

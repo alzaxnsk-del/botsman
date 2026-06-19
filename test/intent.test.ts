@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject } from '../src/intent.js';
+import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject, planCreate } from '../src/intent.js';
 
 describe('looksLikeDelete (keeps delete out of the edit fast-path)', () => {
   it('flags delete-phrased messages (EN + RU)', () => {
@@ -94,5 +94,33 @@ describe('detectIntent', () => {
 
   it('ignores last-active pointing to a deleted project', () => {
     expect(detectIntent('поправь шапку', ['todo'], 'gone')).toEqual({ kind: 'ambiguous', lastSlug: null });
+  });
+});
+
+describe('planCreate (confirm before duplicating)', () => {
+  it('builds immediately when there are no projects yet', () => {
+    expect(planCreate('make a calculator', [])).toEqual({ build: true, similar: null, shown: [], hasMore: false });
+  });
+
+  it('confirms (does not build) once any project exists', () => {
+    const plan = planCreate('make a calculator', ['todo', 'shop']);
+    expect(plan.build).toBe(false);
+    expect(plan.shown).toEqual(['todo', 'shop']); // no fuzzy match → original order
+    expect(plan.hasMore).toBe(false);
+  });
+
+  it('offers the closest-looking project first', () => {
+    // findSimilarProject maps «тамагочи» → tamagotchi-web-app (shared prefix).
+    const plan = planCreate('сделай тамагочи 2.0', ['todo-app', 'tamagotchi-web-app']);
+    expect(plan.similar).toBe('tamagotchi-web-app');
+    expect(plan.shown[0]).toBe('tamagotchi-web-app');
+    expect(plan.shown).toContain('todo-app');
+  });
+
+  it('caps the offered list and flags that there are more', () => {
+    const many = ['a-proj', 'b-proj', 'c-proj', 'd-proj', 'e-proj', 'f-proj', 'g-proj', 'h-proj'];
+    const plan = planCreate('make a calculator', many);
+    expect(plan.shown).toHaveLength(6);
+    expect(plan.hasMore).toBe(true);
   });
 });

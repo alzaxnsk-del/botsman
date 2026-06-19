@@ -108,3 +108,29 @@ function sharedPrefix(a: string, b: string): number {
   while (i < a.length && i < b.length && a[i] === b[i]) i++;
   return i;
 }
+
+/** Decision for a create request: build straight away, or confirm against the
+ *  projects that already exist (offered closest-match first, capped). */
+export interface CreatePlan {
+  /** No projects yet → build immediately, nothing to confuse it with. */
+  build: boolean;
+  /** Closest-looking existing project, if any. */
+  similar: string | null;
+  /** Existing projects to offer as "improve instead" options, closest first, capped. */
+  shown: string[];
+  /** More projects existed than we show. */
+  hasMore: boolean;
+}
+
+/**
+ * Decide whether a create-phrased request should build immediately or first
+ * confirm against existing projects (so it can't silently become a duplicate).
+ * Pure — the gateway turns this into a message + buttons.
+ */
+export function planCreate(description: string, slugs: string[], cap = 6): CreatePlan {
+  if (slugs.length === 0) return { build: true, similar: null, shown: [], hasMore: false };
+  const similar = findSimilarProject(description, slugs);
+  const ordered = similar ? [similar, ...slugs.filter((s) => s !== similar)] : slugs;
+  const shown = ordered.slice(0, cap);
+  return { build: false, similar, shown, hasMore: ordered.length > shown.length };
+}
