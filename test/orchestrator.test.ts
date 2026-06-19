@@ -271,6 +271,28 @@ describe('Orchestrator pipeline', () => {
     ]);
   });
 
+  it('writes an attached reference image into the project dir before the agent runs', async () => {
+    let sawImage = false;
+    const agent: CodingAgent = {
+      run: async (input) => {
+        // The reference file must already be in /work when the agent starts.
+        sawImage = fs.existsSync(path.join(input.projectDir, 'reference.png'));
+        fs.writeFileSync(path.join(input.projectDir, 'package.json'), '{"name":"x"}');
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), 'const p = process.env.PORT;');
+        return { ok: true, summary: 'built from the mockup', durationMs: 1 };
+      },
+    };
+    const orch = makeOrch(agent, fakeEngine());
+    const o = await orch.enqueue(
+      'create', 'Build the UI in the attached image.', () => {}, undefined, undefined,
+      { name: 'reference.png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+    );
+    expect(o.ok).toBe(true);
+    expect(sawImage).toBe(true);
+    // ...and it's persisted with the project (committed alongside the code).
+    expect(fs.existsSync(path.join(paths.projectDir(o.slug), 'reference.png'))).toBe(true);
+  });
+
   it('cancels a still-queued task; a running task cannot be cancelled', async () => {
     const ran: string[] = [];
     const agent: CodingAgent = {
