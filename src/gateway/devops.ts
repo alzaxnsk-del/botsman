@@ -6,6 +6,7 @@ import type { Orchestrator } from '../orchestrator.js';
 import type { HostExec } from '../hostExec.js';
 import { runDoctor } from '../doctor.js';
 import { RESTART_NOTICE_KEY } from '../types.js';
+import { versionLine } from '../version.js';
 
 /**
  * DevOps room: free text → a FIXED catalog of operations. The LLM only picks an
@@ -329,10 +330,16 @@ export async function runMutatingOp(op: DevOpsOp, deps: DevOpsDeps): Promise<str
       // recreate can't race the SQLite write; clear it if the build never lands.
       deps.store.kvSet(RESTART_NOTICE_KEY, '✓ Botsman updated and back online.');
       const r = await deps.hostExec.selfUpdate(deps.hostRepoDir);
+      if (r.ok && r.output.includes('BOTSMAN_NOOP')) {
+        // Nothing new to pull — don't promise a restart that won't happen
+        // (this is the "I update and nothing happens, no version" complaint).
+        deps.store.kvSet(RESTART_NOTICE_KEY, '');
+        return `✓ Already up to date — running ${versionLine()}. Nothing new to install.`;
+      }
       if (r.ok) {
-        // Build + config check passed; only the detached `docker compose up -d`
-        // remains, which we can't observe (it kills this daemon). Set the
-        // expectation so silence is diagnosable rather than mistaken for success.
+        // Build + config check passed; the restart (up -d) runs on the host and
+        // can't be observed here (it kills this daemon). Set the expectation so
+        // silence is diagnosable rather than mistaken for success.
         return '✓ Update built — recreating the container now. I should come back with the new version in ~30–60s. If I go quiet for a few minutes, check `docker compose logs botsman` or /tmp/botsman-selfupdate.log on the host.';
       }
       deps.store.kvSet(RESTART_NOTICE_KEY, '');

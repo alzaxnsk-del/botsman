@@ -27,6 +27,9 @@ export interface HostExecResult {
   timedOut: boolean;
 }
 
+/** Docker label on the one-off privileged nsenter helper containers. */
+export const HOSTEXEC_LABEL = 'botsman.hostexec';
+
 export class HostExec {
   constructor(
     private docker: Dockerode,
@@ -52,7 +55,7 @@ export class HostExec {
           NetworkMode: 'host',
           AutoRemove: false,
         },
-        Labels: { 'botsman.hostexec': '1' },
+        Labels: { [HOSTEXEC_LABEL]: '1' },
       },
       timeoutMs,
     );
@@ -106,27 +109,42 @@ export class HostExec {
       return { ok: false, exitCode: -1, output: `Refusing to self-update: unexpected repo path ${JSON.stringify(repoDir)}.`, timedOut: false };
     }
     const r = repoDir;
+    const log = '/tmp/botsman-selfupdate.log';
     // Robust update:
     //  - `git fetch + reset --hard` tolerates a dirty / divergent / shallow
     //    (`clone --depth 1`) checkout that `git pull --ff-only` would choke on;
-    //    safe.directory (added idempotently — `--add` alone would duplicate the
-    //    line in root's ~/.gitconfig every run) avoids git's "dubious ownership"
-    //    refusal under host root. reset --hard only touches tracked files, so the
-    //    untracked .env is kept.
-    //  - `docker compose config -q` (foreground) catches a bad/changed compose
-    //    file BEFORE the daemon is bounced — the most catchable `up -d` failure.
-    //  - the BUILD runs in the FOREGROUND so its failure is reported (ok=false),
-    //    not lost to a log; only the final `up -d` (which recreates, and so
-    //    kills, this daemon) is detached so it can finish after the daemon dies.
-    //    An `up -d` failure after that point can't be observed here — the caller
-    //    sets expectations and points at the log.
-    const script =
-      `cd '${r}' && ` +
-      `(git config --global --get-all safe.directory 2>/dev/null | grep -qxF '${r}' || ` +
-      `git config --global --add safe.directory '${r}') && ` +
-      `git fetch origin main && git reset --hard FETCH_HEAD && ` +
-      `docker compose config -q && docker compose build && ` +
-      `(nohup docker compose up -d >/tmp/botsman-selfupdate.log 2>&1 &)`;
+    //    safe.directory (added idempotently) avoids git's "dubious ownership"
+    //    refusal under host root. reset --hard only touches tracked files (the
+    //    untracked .env is kept).
+    //  - `config -q` then `build` run in the FOREGROUND so their failures are
+    //    reported (ok=false), not lost to a log.
+    //  - NO-OP by IMAGE IDENTITY, not git HEAD: compare the running daemon's
+    //    image to the freshly-built one. A docs/test-only commit moves HEAD but
+    //    leaves every layer cached → identical image → nothing to restart, so we
+    //    print BOTSMAN_NOOP instead of promising a restart that never comes. This
+    //    also self-heals a stale image whose HEAD already matched origin/main.
+    //  - CRUX: `docker compose up -d` recreates — and so kills — this daemon, so
+    //    it must OUTLIVE the nsenter helper container. A backgrounded process
+    //    stays in the helper's cgroup and is killed when HostExec.spawn force-
+    //    removes the helper (nsenter doesn't enter a cgroup namespace) — that is
+    //    why the previous `nohup … &` silently never restarted. Hand it to host
+    //    systemd (its own cgroup, survives the helper's removal); fall back to a
+    //    foreground up -d (the daemon dies mid-recreate before it can remove the
+    //    helper, so the helper lives on to finish it). up -d's output is appended
+    //    to the log the owner is pointed at — including on the systemd path.
+    const upd = `cd '${r}' && docker compose up -d >>${log} 2>&1`;
+    const script = [
+      `cd '${r}' || exit 1`,
+      `git config --global --get-all safe.directory 2>/dev/null | grep -qxF '${r}' || git config --global --add safe.directory '${r}'`,
+      `git fetch origin main || exit 1`,
+      `git reset --hard FETCH_HEAD || exit 1`,
+      `docker compose config -q || exit 1`,
+      `running="$(docker inspect --format '{{.Image}}' botsman-daemon 2>/dev/null || true)"`,
+      `docker compose build || exit 1`,
+      `built="$(docker image inspect --format '{{.Id}}' botsman 2>/dev/null || true)"`,
+      `[ -n "$built" ] && [ "$running" = "$built" ] && { echo BOTSMAN_NOOP; exit 0; }`,
+      `if command -v systemd-run >/dev/null 2>&1; then systemd-run --no-block --collect sh -c "${upd}" >/dev/null 2>&1 || ( ${upd} ); else ( ${upd} ); fi`,
+    ].join('\n');
     // A cold rebuild re-runs the slow `playwright install` (Chromium download);
     // give it real headroom so the cap doesn't SIGKILL it. Cached rebuilds
     // (only src changed) are ~1 min.

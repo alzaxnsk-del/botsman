@@ -10,6 +10,7 @@ import {
   ensureBareRepo, syncToBare, syncFromBare, syncFromBareIfAhead, log as gitLog,
 } from './git.js';
 import { AGENT_LABEL } from './agent/ClaudeCodeAgent.js';
+import { HOSTEXEC_LABEL } from './hostExec.js';
 import { serverPublicIp } from './doctor.js';
 import { cloneUrl } from './clone.js';
 import { scanForSecrets } from './deploy/secretScan.js';
@@ -447,14 +448,20 @@ export class Orchestrator {
     const resumable = interrupted
       .filter((t) => t.kind === 'create' && !!this.store.getProject(t.projectSlug))
       .map((t) => ({ slug: t.projectSlug, instruction: t.instruction }));
-    try {
-      const orphans = await docker.listContainers({ all: true, filters: { label: [AGENT_LABEL] } });
-      for (const c of orphans) {
-        await docker.getContainer(c.Id).remove({ force: true }).catch(() => {});
+    // Stale one-off containers, force-removed: the throwaway agent containers,
+    // and the privileged host-exec helpers (a self-update's foreground `up -d`
+    // recreates the daemon before its own finally can remove the helper, so it
+    // can be left behind — reap it here on the next boot).
+    for (const label of [AGENT_LABEL, HOSTEXEC_LABEL]) {
+      try {
+        const orphans = await docker.listContainers({ all: true, filters: { label: [label] } });
+        for (const c of orphans) {
+          await docker.getContainer(c.Id).remove({ force: true }).catch(() => {});
+        }
+        if (orphans.length) notes.push(`removed stale ${label} containers: ${orphans.length}`);
+      } catch (e) {
+        logger.warn('container cleanup failed', { label, error: String(e) });
       }
-      if (orphans.length) notes.push(`removed stale agent containers: ${orphans.length}`);
-    } catch (e) {
-      logger.warn('agent container cleanup failed', { error: String(e) });
     }
     return { notes, resumable };
   }
