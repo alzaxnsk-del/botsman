@@ -271,6 +271,36 @@ describe('Orchestrator pipeline', () => {
     ]);
   });
 
+  it('cancels a still-queued task; a running task cannot be cancelled', async () => {
+    const ran: string[] = [];
+    const agent: CodingAgent = {
+      run: async (input) => {
+        ran.push(input.instruction);
+        await new Promise((r) => setTimeout(r, 50)); // keep the first task running
+        fs.writeFileSync(path.join(input.projectDir, 'package.json'), '{"name":"x"}');
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), 'const p = process.env.PORT;');
+        return { ok: true, summary: 'ok', durationMs: 50 };
+      },
+    };
+    const orch = makeOrch(agent, fakeEngine());
+
+    let cancelFirst: (() => boolean) | null = null;
+    let cancelSecond: (() => boolean) | null = null;
+    // The first task starts draining synchronously, so it's already running;
+    // the second sits in the queue behind it.
+    const first = orch.enqueue('create', 'one', () => {}, undefined, (c) => { cancelFirst = c; });
+    const second = orch.enqueue('create', 'two', () => {}, undefined, (c) => { cancelSecond = c; });
+
+    expect(cancelFirst!()).toBe(false); // already running → no-op
+    expect(cancelSecond!()).toBe(true); // still queued → pulled out
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(false);
+    expect(b.cancelled).toBe(true);
+    expect(ran).toEqual(['one']); // the cancelled task never ran the agent
+  });
+
   it('create fails clearly when the agent produces no application files', async () => {
     // The agent "ran" (ok) but wrote nothing — only the seeded .gitignore/CLAUDE.md
     // remain, which is what slipped past the old "no files" guard.
