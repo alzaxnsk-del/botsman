@@ -122,7 +122,7 @@ The installer sets up Docker (if needed), starts the daemon + reverse proxy, and
 
 Then describe your first service. Installing **as root is fine** — the daemon runs as root, but the coding agent and every deployed service always run as unprivileged users in isolated containers.
 
-> Full walkthrough (DNS, config reference, uninstall) → [docs/install.md](docs/install.md). Документация на русском → [docs/README.ru.md](docs/README.ru.md).
+> Full walkthrough (DNS, config reference, uninstall) → [docs/install.md](docs/install.md).
 
 ---
 
