@@ -21,7 +21,7 @@ import {
   type DevOpsOp, type DevOpsOpId, type DevOpsDeps, type Route,
 } from './devops.js';
 import { homeStatusLines, homeKeyboard, degradedNoneMessage } from './home.js';
-import { failureMessage } from './format.js';
+import { failureMessage, withElapsed } from './format.js';
 import { localDevInstructions } from '../clone.js';
 import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
@@ -34,7 +34,7 @@ import { RESTART_NOTICE_KEY, SETUP_BACKUP_KEY, PREFLIGHT_WARNINGS_KEY, type Stag
 
 const STAGE_LABELS: Record<Stage, string> = {
   accepted: '📥 Got it, working…',
-  generating: '🤖 Generating code',
+  generating: '🤖 Generating code (usually a few minutes)',
   committing: '💾 Committing changes',
   building: '🔨 Building the image',
   deploying: '🚀 Deploying',
@@ -327,9 +327,11 @@ export class TelegramGateway {
         await ctx.answerCallbackQuery({ text: 'Working…' });
         const msgId = ctx.callbackQuery.message?.message_id;
         if (action === 'proxy') {
+          if (msgId) await this.bot.api.editMessageText(chatId, msgId, '🔁 Restarting the proxy and re-issuing TLS… (~15s)').catch(() => {});
           await this.deployEngine.restartProxy().catch(() => {});
           await sleep(15_000); // give Caddy time to come up and re-attempt issuance
         } else if (action === 'app') {
+          if (msgId) await this.bot.api.editMessageText(chatId, msgId, '▶️ Restarting the service… (~8s)').catch(() => {});
           await this.deployEngine.restartService(slug).catch(() => {});
           await sleep(8_000);
         }
@@ -445,6 +447,7 @@ export class TelegramGateway {
         // The whole exec/exec2 gate lives in runDevOpsConfirm (unit-tested);
         // here we just wire grammy IO to it. `confirmed` is set only after the
         // warning renders, so a failed edit can't collapse the double-confirm.
+        let stopHb: (() => void) | null = null;
         await runDevOpsConfirm(entry, data, {
           answer: (text) => ctx.answerCallbackQuery(text ? { text } : undefined).then(() => {}),
           renderWarning: (text) => {
@@ -452,9 +455,13 @@ export class TelegramGateway {
             return this.bot.api.editMessageText(chatId, entry.messageId, text, { reply_markup: kb })
               .then(() => true).catch(() => false);
           },
-          showRunning: (text) => this.bot.api.editMessageText(chatId, entry.messageId, text).then(() => {}).catch(() => {}),
+          // After showing "⏳ running", keep a heartbeat going: a host op (build,
+          // apt) can take minutes, and silence reads as "frozen".
+          showRunning: (text) => this.bot.api.editMessageText(chatId, entry.messageId, text)
+            .then(() => { stopHb = this.startHeartbeat(chatId, entry.messageId, text); })
+            .catch(() => {}),
           execute: () => runMutatingOp(entry.op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`),
-          showResult: (text) => this.editMdSafe(chatId, entry.messageId, text),
+          showResult: (text) => { stopHb?.(); return this.editMdSafe(chatId, entry.messageId, text); },
           clearPending: () => this.pendingDevOps.delete(chatId),
         });
         return;
@@ -899,6 +906,23 @@ export class TelegramGateway {
     this.pendingDelete.set(ctx.chat!.id, { messageId: sent.message_id, slug });
   }
 
+  /** A standalone heartbeat for a single edited status message — used by long
+   *  host/devops ops (self-update build, apt upgrade, redeploy) so they don't
+   *  sit silent for minutes. Returns a stop fn; elapsed shows once past a minute. */
+  private startHeartbeat(chatId: number, messageId: number, base: string): () => void {
+    let stopped = false;
+    let dots = 0;
+    const startedAt = Date.now();
+    const iv = setInterval(() => {
+      if (stopped) return;
+      dots = (dots % 3) + 1;
+      void this.bot.api
+        .editMessageText(chatId, messageId, `${withElapsed(base, startedAt, Date.now())}${'.'.repeat(dots)}`)
+        .catch(() => {});
+    }, HEARTBEAT_MS);
+    return () => { stopped = true; clearInterval(iv); };
+  }
+
   /** 🔍 Review one-tap: a read-only senior-engineer pass over the project.
    *  Debounced per chat — askProject runs outside the task queue, so repeated
    *  taps would otherwise pile up concurrent agent containers on the VPS. */
@@ -1011,6 +1035,7 @@ export class TelegramGateway {
 
     let lastText = STAGE_LABELS.accepted;
     let dots = 0;
+    let stageStartedAt = Date.now();
     // Once the outcome is being reported, stage/heartbeat edits must stop —
     // an in-flight "✅ Done" edit racing the rich final message would win.
     let finished = false;
@@ -1018,16 +1043,21 @@ export class TelegramGateway {
       if (finished) return;
       lastText = text;
       dots = 0;
+      stageStartedAt = Date.now(); // elapsed is per-stage, so it can't drift/lie
       await this.bot.api.editMessageText(chatId, statusMsg.message_id, text).catch(() => {});
     };
-    // Heartbeat: append dots so the user sees progress even in long stages (AC-F2 responsiveness).
-    const heartbeat = setInterval(() => {
+    // Heartbeat: show elapsed time on the active stage + a cycling dot, so the
+    // multi-minute stages (generating, building) read as progress, not a freeze.
+    const tick = (): void => {
       if (finished) return;
       dots = (dots % 3) + 1;
-      void this.bot.api
-        .editMessageText(chatId, statusMsg.message_id, `${lastText}${'.'.repeat(dots)}`)
-        .catch(() => {});
-    }, HEARTBEAT_MS);
+      const text = `${withElapsed(lastText, stageStartedAt, Date.now())}${'.'.repeat(dots)}`;
+      void this.bot.api.editMessageText(chatId, statusMsg.message_id, text).catch(() => {});
+    };
+    // A one-shot early nudge so the first sign of life isn't a full 25s away.
+    const earlyNudge = setTimeout(tick, 9_000);
+    const heartbeat = setInterval(tick, HEARTBEAT_MS);
+    const stopTicks = (): void => { clearTimeout(earlyNudge); clearInterval(heartbeat); };
 
     try {
       const outcome = await this.orchestrator.enqueue(
@@ -1043,7 +1073,7 @@ export class TelegramGateway {
         slug,
       );
       finished = true;
-      clearInterval(heartbeat);
+      stopTicks();
       await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction });
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
       // A fresh build → connect to it, so the next message goes straight to the
@@ -1062,7 +1092,7 @@ export class TelegramGateway {
         ).catch(() => {});
       }
     } catch (e) {
-      clearInterval(heartbeat);
+      stopTicks();
       finished = true;
       await this.reportOutcome(
         ctx, chatId, statusMsg.message_id,
