@@ -11,7 +11,7 @@ Botsman runs on your VPS. You talk to it from Telegram (or push code from your l
 
 It comes down to three "ones":
 
-1. **One line** stands it up on your own VPS — `curl … | bash`.
+1. **One line** stands it up on your own VPS — `curl … | sudo bash`.
 2. **One message** turns a description into a *live* service — code, database, subdomain, HTTPS, screenshot — at a real URL.
 3. **One command** pulls it into Claude Code on your laptop; a `git push` redeploys.
 
@@ -108,7 +108,7 @@ Under the hood:
 **2. Install.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/alzaxnsk-del/botsman/main/install.sh | sudo bash
 ```
 
 The installer sets up Docker (if needed), starts the daemon + reverse proxy, and asks just **two questions** in the console: your bot token and your Telegram user ID.

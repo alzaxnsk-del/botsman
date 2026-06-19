@@ -37,7 +37,7 @@ export async function runSetupWizard(): Promise<number> {
     const tg = await checkTelegramToken(telegramBotToken);
     if (!tg.ok) {
       bad(`The token does not work (${tg.error}).`);
-      hint('Run the wizard again: botsman setup');
+      hint('Run the wizard again: cd /opt/botsman && docker compose run --rm --no-deps botsman setup');
       return 1;
     }
     ok('token is valid');
@@ -48,7 +48,7 @@ export async function runSetupWizard(): Promise<number> {
     const ownerId = Number(ownerIdRaw);
     if (!Number.isInteger(ownerId) || ownerId <= 0) {
       bad('A positive number expected.');
-      hint('Run the wizard again: botsman setup');
+      hint('Run the wizard again: cd /opt/botsman && docker compose run --rm --no-deps botsman setup');
       return 1;
     }
     ok(`owner: ${ownerId}`);
