@@ -30,6 +30,12 @@ describe('looksOperational', () => {
     expect(looksOperational('shut down todo')).toBe(true);
     expect(looksOperational('останови todo')).toBe(true);
   });
+  it('flags transliterated/slang ops a Russian user would actually type', () => {
+    expect(looksOperational('апдейт ботсмана')).toBe(true);
+    expect(looksOperational('рестарт todo')).toBe(true);
+    expect(looksOperational('пересобери и задеплой')).toBe(true);
+    expect(looksOperational('recycle the containers')).toBe(true);
+  });
   it('does not flag authoring', () => {
     expect(looksOperational('add a dark theme')).toBe(false);
     expect(looksOperational('make a TODO app')).toBe(false);
@@ -48,6 +54,11 @@ describe('looksLikeQuestion', () => {
     expect(looksLikeQuestion('tell me how the schema works')).toBe(true);
     expect(looksLikeQuestion('explain the auth flow')).toBe(true);
     expect(looksLikeQuestion('расскажи как устроено')).toBe(true);
+  });
+  it('detects Russian case-variant interrogatives', () => {
+    expect(looksLikeQuestion('какие команды есть')).toBe(true);
+    expect(looksLikeQuestion('каким образом он деплоит')).toBe(true);
+    expect(looksLikeQuestion('кто его собрал')).toBe(true);
   });
   it('does not flag imperatives', () => {
     expect(looksLikeQuestion('add a dark theme')).toBe(false);

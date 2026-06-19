@@ -12,8 +12,8 @@ export type Intent =
   | { kind: 'ambiguous'; lastSlug: string | null };
 
 // NB: no \b after the group — JS word boundaries don't work with Cyrillic.
-const CREATE_VERBS = /^(сделай|создай|собери|построй|напиши|нужен|нужна|нужно|хочу|новый|новая|новое|make|build|create|new|i want|i need)(\s|[:,]|$)/i;
-const PRODUCT_NOUNS = /(сервис|приложение|бот|сайт|страничк|service|app|site|bot)/i;
+const CREATE_VERBS = /^(сделай|сделать|создай|создать|собери|собрать|построй|построить|напиши|написать|разработай|разработать|запили|накидай|замути|склепай|нужен|нужна|нужно|хочу|новый|новая|новое|make|build|create|new|need|i want|i need|i'd like)(\s|[:,]|$)/i;
+const PRODUCT_NOUNS = /(сервис|приложение|прилож|программ|платформ|дашборд|панель|форм|игр|калькулятор|магазин|лендинг|табл|сайт|страничк|бот|tool|platform|dashboard|page|website|landing|app|site|bot|service|game|shop|store|calculator)/i;
 
 export function detectIntent(
   text: string,
@@ -64,7 +64,10 @@ export function looksLikeCreate(text: string): boolean {
 
 // No \b (Cyrillic). Keep delete-phrased messages out of the edit fast-path so
 // they reach the LLM router, which maps them to a delete-with-confirmation.
-const DELETE_VERBS = /(^|\s)(удали[а-яё]*|снес[а-яё]*|delete|remove|drop)(\s|$)/i;
+// "убери/сотри/стер" are deliberately EXCLUDED — they're common content edits
+// ("убери отступ", "сотри фон"), not "delete the project". Keep only verbs that
+// clearly mean removing the whole project.
+const DELETE_VERBS = /(^|\s)(удали[а-яё]*|снес[а-яё]*|уничтож[а-яё]*|delete|remove|drop|destroy)(\s|$)/i;
 
 export function looksLikeDelete(text: string): boolean {
   return DELETE_VERBS.test(text.trim().toLowerCase());
