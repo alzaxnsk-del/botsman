@@ -158,16 +158,7 @@ export class TelegramGateway {
           '',
           'The buttons below change with where you are: 🏠 Home, inside a project, or the 🛠 Server room (each shows its own quick actions and 🚪 Exit).',
           '',
-          'Commands:',
-          '/list — all projects',
-          '/status <slug> — status and git access',
-          '/logs <slug> — container logs',
-          '/memory <slug> — what the agent remembers about a project',
-          '/doctor <slug> — diagnose problems, with one-tap fixes',
-          '/rollback <slug> — roll back to the previous version',
-          '/delete <slug> — delete a project',
-          '/setup — change agent auth, domain or telemetry',
-          '/version — the running version',
+          'Need a command? Tap the “/” menu — /list, /logs, /doctor, /rollback, /setup… (most take a <slug>).',
           '',
           versionLine(),
         ].join('\n'),
@@ -229,14 +220,17 @@ export class TelegramGateway {
       } catch {
         return void ctx.reply(`No memory recorded yet for ${slug}.`);
       }
-      await this.replyMdSafe(ctx, `Memory for ${slug} (CLAUDE.md):\n\`\`\`\n${content.slice(-3500) || '(empty)'}\n\`\`\``);
+      const trunc = content.length > 3500 ? '…(earlier lines trimmed)\n' : '';
+      await this.replyMdSafe(ctx, `Memory for ${slug} (CLAUDE.md):\n\`\`\`\n${trunc}${content.slice(-3500) || '(empty)'}\n\`\`\``);
     });
 
     this.bot.command('rollback', async (ctx) => {
       const slug = this.argSlug(ctx);
       if (!slug) return void ctx.reply('Usage: /rollback <slug>');
       if (!this.store.projectExists(slug)) return void ctx.reply(`Project ${slug} not found.`);
-      await this.runTask('rollback', slug, 'rollback', ctx);
+      // Mutating + irreversible-ish → confirm first, exactly like the ↩️ keyboard
+      // tap (was: rolled back immediately on the command).
+      await this.promptMutatingOp(ctx, opLiteral('rollback_service', slug));
     });
 
     this.bot.command('delete', async (ctx) => {
@@ -295,18 +289,23 @@ export class TelegramGateway {
       if (data.startsWith('setup:')) {
         await ctx.answerCallbackQuery();
         const what = data.slice('setup:'.length);
+        // Honest timing: a running build delays the restart (restartWhenIdle waits
+        // for the queue), so don't promise "~10s" when something is in flight.
+        const when = this.orchestrator.queueLength > 0
+          ? 'right after the current task finishes'
+          : 'in about 10 seconds';
         if (what === 'auth') {
           const cfg = updateConfigFile({});
           this.store.kvSet(SETUP_BACKUP_KEY, JSON.stringify({
             anthropicApiKey: cfg.anthropicApiKey, claudeCodeOauthToken: cfg.claudeCodeOauthToken,
           }));
           updateConfigFile({ anthropicApiKey: undefined, claudeCodeOauthToken: undefined });
-          await ctx.reply('Restarting to change the coding-agent auth — I will ask here in ~10s.\nSend /cancel there to keep your current one.');
+          await ctx.reply(`Restarting to change the coding-agent auth — I'll ask you here ${when}. Once I'm back, send /cancel to keep your current one.`);
         } else if (what === 'domain') {
           const cfg = updateConfigFile({});
           this.store.kvSet(SETUP_BACKUP_KEY, JSON.stringify({ baseDomain: cfg.baseDomain }));
           updateConfigFile({ baseDomain: undefined });
-          await ctx.reply('Restarting to change the domain — I will ask here in ~10s.\nSend /cancel there to keep your current one. (Existing projects keep their addresses.)');
+          await ctx.reply(`Restarting to change the domain — I'll ask you here ${when}. Once I'm back, send /cancel to keep your current one. (Existing projects keep their addresses.)`);
         } else if (what === 'telemetry') {
           const cfg = updateConfigFile({});
           const enabled = !cfg.telemetry.enabled;
@@ -565,13 +564,8 @@ export class TelegramGateway {
         if (action === 'logs') return void this.sendLogs(ctx, connected);
         if (action === 'code') return void this.sendLocalDevInfo(ctx, connected);
         if (action === 'rollback') {
-          // Mutating → reuse the devops confirm flow (single confirm; not
-          // host-level) so a stray keyboard tap can't roll back without asking.
-          const op = opLiteral('rollback_service', connected);
-          const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
-          const sent = await ctx.reply(`${op.humanSummary}?`, { reply_markup: kb });
-          this.pendingDevOps.set(chatId, { messageId: sent.message_id, op, confirmed: false });
-          return;
+          // Mutating → confirm first so a stray keyboard tap can't roll back.
+          return void this.promptMutatingOp(ctx, opLiteral('rollback_service', connected));
         }
       }
 
@@ -921,6 +915,16 @@ export class TelegramGateway {
     this.pendingDelete.set(ctx.chat!.id, { messageId: sent.message_id, slug });
   }
 
+  /** Show the single-confirm card for a mutating devops op (✅ Execute / ✖️ Cancel)
+   *  and remember it (messageId-guarded). Host-level ops escalate to a 2nd confirm
+   *  inside runDevOpsConfirm. Shared by /rollback, the ↩️ keyboard tap and server
+   *  actions so a mutating op is never one stray tap away from running. */
+  private async promptMutatingOp(ctx: Context, op: DevOpsOp): Promise<void> {
+    const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
+    const sent = await ctx.reply(`${op.humanSummary}?`, { reply_markup: kb });
+    this.pendingDevOps.set(ctx.chat!.id, { messageId: sent.message_id, op, confirmed: false });
+  }
+
   /** A standalone heartbeat for a single edited status message — used by long
    *  host/devops ops (self-update build, apt upgrade, redeploy) so they don't
    *  sit silent for minutes. Returns a stop fn; elapsed shows once past a minute. */
@@ -961,7 +965,8 @@ export class TelegramGateway {
   /** 📋 Logs one-tap (and the /logs command): last container log lines. */
   private async sendLogs(ctx: Context, slug: string): Promise<void> {
     const logs = await this.deployEngine.containerLogs(slug, 50).catch((e) => `Error: ${(e as Error).message}`);
-    await this.replyMdSafe(ctx, `Logs for ${slug} (last lines):\n\`\`\`\n${logs.slice(-3500) || '(empty)'}\n\`\`\``);
+    const trunc = logs.length > 3500 ? '…(earlier lines trimmed)\n' : '';
+    await this.replyMdSafe(ctx, `Logs for ${slug} (last lines):\n\`\`\`\n${trunc}${logs.slice(-3500) || '(empty)'}\n\`\`\``);
   }
 
   /** 💻 Claude Code: how to clone this project and develop it locally. Fills in
@@ -987,9 +992,7 @@ export class TelegramGateway {
       await this.editMdSafe(chatId, thinking.message_id, result);
       return;
     }
-    const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
-    const sent = await ctx.reply(`${op.humanSummary}?`, { reply_markup: kb });
-    this.pendingDevOps.set(chatId, { messageId: sent.message_id, op, confirmed: false });
+    await this.promptMutatingOp(ctx, op);
   }
 
   /**
@@ -1040,7 +1043,12 @@ export class TelegramGateway {
     ctx: Context,
   ): Promise<void> {
     const chatId = ctx.chat!.id;
-    const queued = this.orchestrator.queueLength > 0 ? ' (queued behind the current task)' : '';
+    // Acknowledge clearly when busy: the message IS received, it's just queued
+    // (one task at a time). Kept in lastText so the heartbeat doesn't drop it
+    // while waiting; the first real stage update replaces it once it starts.
+    const queued = this.orchestrator.queueLength > 0
+      ? '\n⏳ Queued — one task at a time; this starts right after the current one finishes.'
+      : '';
     // IMPORTANT: no reply_markup here. This message is edited live through the
     // task stages, and Telegram cannot editMessageText a message that carries a
     // ReplyKeyboardMarkup — attaching the room keyboard here froze the status at
@@ -1049,8 +1057,8 @@ export class TelegramGateway {
     // Name the target project from the first frame, so an edit/rollback never
     // leaves the user guessing WHICH project is changing (create fills it in once
     // the slug is generated, via the 'accepted' detail below).
-    const head = STAGE_LABELS.accepted + (slug ? ` · ${slug}` : '');
-    const statusMsg = await ctx.reply(`${head}${queued}`);
+    const head = STAGE_LABELS.accepted + (slug ? ` · ${slug}` : '') + queued;
+    const statusMsg = await ctx.reply(head);
 
     let lastText = head;
     let dots = 0;
@@ -1228,6 +1236,22 @@ export class TelegramGateway {
   }
 
   async start(): Promise<void> {
+    // Populate Telegram's native "/" menu so commands are discoverable (and
+    // tappable on mobile) without memorising them from /start.
+    await this.bot.api.setMyCommands([
+      { command: 'list', description: 'All projects' },
+      { command: 'projects', description: 'Pick a project to connect to' },
+      { command: 'status', description: 'Status + git access — /status <slug>' },
+      { command: 'logs', description: 'Container logs — /logs <slug>' },
+      { command: 'doctor', description: 'Diagnose problems — /doctor <slug>' },
+      { command: 'rollback', description: 'Roll back to the previous version — /rollback <slug>' },
+      { command: 'memory', description: "What the agent remembers — /memory <slug>" },
+      { command: 'delete', description: 'Delete a project — /delete <slug>' },
+      { command: 'home', description: 'Home / main menu' },
+      { command: 'server', description: 'Server admin room' },
+      { command: 'setup', description: 'Change agent auth, domain, model or telemetry' },
+      { command: 'version', description: 'The running version' },
+    ]).catch((e) => logger.warn('setMyCommands failed', { error: String(e) }));
     // Long polling (§2): no public IP / webhook needed.
     void this.bot.start({
       onStart: (me) => logger.info('telegram gateway started', { username: me.username }),
