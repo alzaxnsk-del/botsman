@@ -38,7 +38,7 @@ const STAGE_LABELS: Record<Stage, string> = {
   committing: '💾 Committing changes',
   building: '🔨 Building the image',
   deploying: '🚀 Deploying',
-  checking: '🔍 Checking the service responds',
+  checking: '🌐 Checking the service responds',
   screenshot: '📸 Taking a screenshot',
   done: '✅ Done',
   failed: '❌ Failed',
@@ -178,7 +178,7 @@ export class TelegramGateway {
     this.bot.command('list', async (ctx) => {
       const projects = this.store.listProjects();
       if (!projects.length) {
-        await ctx.reply('No projects yet. Describe a service — and I will build it.', { reply_markup: this.replyKeyboardFor(ctx.chat!.id) });
+        await ctx.reply('No projects yet. Describe one and I will build it.', { reply_markup: this.replyKeyboardFor(ctx.chat!.id) });
         return;
       }
       const lines = await Promise.all(
@@ -190,9 +190,11 @@ export class TelegramGateway {
           return `${mark} *${p.slug}* — ${p.status}\nhttps://${p.domain}/`;
         }),
       );
-      // Tappable: each project enters its room.
+      // A small legend so the status dots aren't a guessing game.
+      lines.push('🟢 live · 🟡 container down · 🔴 failed · ⚪️ stopped\nTap a project below to connect.');
+      // Tappable: each project connects to it (same 🔗 affordance as the picker).
       const kb = new InlineKeyboard();
-      for (const p of projects) kb.text(`📦 ${p.slug}`, `room:project:${p.slug}`).row();
+      for (const p of projects) kb.text(`🔗 ${p.slug}`, `room:project:${p.slug}`).row();
       await ctx.reply(lines.join('\n\n'), {
         parse_mode: 'Markdown',
         link_preview_options: { is_disabled: true },
@@ -605,7 +607,7 @@ export class TelegramGateway {
       clearServerRoom(this.store, chatId);
       setFocus(this.store, chatId, room.slug);
       await ctx.reply(
-        `🔗 *Connected to ${room.slug}.*\nEverything now goes here — changes ("add a dark theme") and questions ("how is this built?"), no extra prompts.\nQuick actions are on the keyboard below: 🔍 Review · 📋 Logs · ↩️ Rollback (asks first). Tap 🚪 Exit to disconnect.`,
+        `🔗 *Connected to ${room.slug}.*\nChanges ("add a dark theme") and questions ("how is this built?") now go straight here — no extra prompts. (Server ops like "restart" still ask first.)\nQuick actions below: 🔍 Review · 📋 Logs · ↩️ Rollback (asks first). Tap 🚪 Exit to disconnect.`,
         { parse_mode: 'Markdown', reply_markup: projectKeyboard() },
       );
       return;
@@ -717,11 +719,13 @@ export class TelegramGateway {
     }
     const slugs = this.store.listProjects().map((p) => p.slug);
     const inServer = inServerRoom(this.store, chatId);
-    // In the server room there is no "connected" project — don't let a stale
-    // last_active masquerade as one (it would auto-target a bare op or, worse,
-    // auto-apply a high-confidence edit with no confirm). Outside it, last_active
-    // still biases bare follow-ups as before.
-    const focused = getFocus(this.store, chatId) ?? (inServer ? null : this.store.kvGet(`last_active:${chatId}`));
+    // Only an EXPLICIT connection (focus) silently routes a bare follow-up to a
+    // project. A stale last_active must NOT masquerade as "connected": a bare
+    // "add a dark theme" days later should never silently edit a project the user
+    // never reopened. Auto-connect after a build sets focus, so the normal
+    // iterate loop is unaffected; last_active only seeds the "Edit <recent>"
+    // suggestion buttons (see dispatchRoute 'none' / fallbackNoLlm).
+    const focused = inServer ? null : getFocus(this.store, chatId);
 
     // No-LLM authoring fast-path. Only HIGH-confidence, SAFE shortcuts here —
     // anything brittle goes to the LLM router (which gates ops behind a confirm).
@@ -760,8 +764,17 @@ export class TelegramGateway {
     const similar = findSimilarProject(description, slugs);
     const ordered = similar ? [similar, ...slugs.filter((s) => s !== similar)] : slugs;
     const shown = ordered.slice(0, 6); // keep the keyboard sane for many projects
-    const kb = new InlineKeyboard().text('🆕 New project', 'intent:new').row();
-    for (const s of shown) kb.text(`✏️ ${s}`, `intent:edit:${s}`).row();
+    const kb = new InlineKeyboard();
+    if (similar) {
+      // A near-duplicate exists → lead with "improve it" so the DEFAULT (top) tap
+      // isn't an accidental clone; the New-project escape hatch sits right below.
+      kb.text(`✏️ Improve ${similar}`, `intent:edit:${similar}`).row();
+      kb.text('🆕 New project', 'intent:new').row();
+      for (const s of shown.filter((s) => s !== similar)) kb.text(`✏️ ${s}`, `intent:edit:${s}`).row();
+    } else {
+      kb.text('🆕 New project', 'intent:new').row();
+      for (const s of shown) kb.text(`✏️ ${s}`, `intent:edit:${s}`).row();
+    }
     // Plain text (no Markdown): the description is arbitrary user text.
     const desc = description.length > 80 ? description.slice(0, 79) + '…' : description;
     const more = ordered.length > shown.length ? "\n(or type a project's name to change it)" : '';
@@ -850,9 +863,10 @@ export class TelegramGateway {
           ).catch(() => {});
           return;
         }
-        const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
-        if (focused && this.store.projectExists(focused)) kb.text(`✏️ Edit ${focused}`, `intent:edit:${focused}`);
-        await this.bot.api.editMessageText(chatId, thinkingId, 'Is this a new service or a change to an existing one?', { reply_markup: kb }).catch(() => {});
+        const kb = new InlineKeyboard().text('🆕 New project', 'intent:new');
+        const recent = focused ?? this.store.kvGet(`last_active:${chatId}`);
+        if (recent && this.store.projectExists(recent)) kb.text(`✏️ Edit ${recent}`, `intent:edit:${recent}`);
+        await this.bot.api.editMessageText(chatId, thinkingId, 'Is this a new project, or a change to an existing one?', { reply_markup: kb }).catch(() => {});
         this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text });
         return;
       }
@@ -879,9 +893,10 @@ export class TelegramGateway {
     // button-driven), so a new-project request gets the same guard here.
     if (intent.kind === 'create') return void this.createOrAsk(ctx, intent.description, slugs, null);
     if (intent.kind === 'edit') return void this.runTask('edit', intent.slug, intent.instruction, ctx);
-    const kb = new InlineKeyboard().text('🆕 New service', 'intent:new');
-    if (intent.lastSlug && this.store.projectExists(intent.lastSlug)) kb.text(`✏️ Edit ${intent.lastSlug}`, `intent:edit:${intent.lastSlug}`);
-    const sent = await ctx.reply('Is this a new service or a change to an existing one?', { reply_markup: kb });
+    const kb = new InlineKeyboard().text('🆕 New project', 'intent:new');
+    const recent = focused ?? this.store.kvGet(`last_active:${chatId}`);
+    if (recent && this.store.projectExists(recent)) kb.text(`✏️ Edit ${recent}`, `intent:edit:${recent}`);
+    const sent = await ctx.reply('Is this a new project, or a change to an existing one?', { reply_markup: kb });
     this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text });
   }
 
@@ -1031,9 +1046,13 @@ export class TelegramGateway {
     // ReplyKeyboardMarkup — attaching the room keyboard here froze the status at
     // "Got it, working…". The keyboard is surfaced by /start, /list, the ready
     // message and room switches instead.
-    const statusMsg = await ctx.reply(`${STAGE_LABELS.accepted}${queued}`);
+    // Name the target project from the first frame, so an edit/rollback never
+    // leaves the user guessing WHICH project is changing (create fills it in once
+    // the slug is generated, via the 'accepted' detail below).
+    const head = STAGE_LABELS.accepted + (slug ? ` · ${slug}` : '');
+    const statusMsg = await ctx.reply(`${head}${queued}`);
 
-    let lastText = STAGE_LABELS.accepted;
+    let lastText = head;
     let dots = 0;
     let stageStartedAt = Date.now();
     // Once the outcome is being reported, stage/heartbeat edits must stop —
@@ -1068,7 +1087,8 @@ export class TelegramGateway {
           // 'done'/'failed' are not shown as stages: the rich outcome message
           // (link, summary, screenshot) supersedes them.
           if (stage === 'done' || stage === 'failed') return;
-          void update(`${STAGE_LABELS[stage]}${detail && stage !== 'accepted' ? ` — ${detail}` : ''}`);
+          const target = slug ? ` · ${slug}` : '';
+          void update(`${STAGE_LABELS[stage]}${target}${detail && stage !== 'accepted' ? ` — ${detail}` : ''}`);
         },
         slug,
       );
