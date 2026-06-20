@@ -139,6 +139,8 @@ There are no modes to remember — write what you want, and Botsman routes it by
 | "how is this built?", "what's in the logs?" | **answers** — without deploying |
 | "show the load", "clean up disk", "restart todo", "update the server" | runs **server ops** |
 
+You don't have to type everything: **attach a spec document** (`.md`, `.txt`, source, JSON) and Botsman builds or changes from it, or **send a UI mockup or a screenshot of a bug** and the coding agent uses the image as a visual reference. A caption, if you add one, is your instruction.
+
 Server reads (metrics, logs, diagnosis) run immediately; anything that changes state asks for a one-tap confirmation, and host-level actions (OS update, Botsman self-update) ask twice.
 
 **Botsman never silently guesses.** If a message could be a new project or a change to an existing one — or it's unclear which project — it **asks with buttons** ("Change 📦 todo? · 🆕 New project") instead of acting. Before building something whose name resembles an existing project, it checks with you first.
