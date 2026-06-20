@@ -155,6 +155,7 @@ Rules:
 - A message about fixing, reviewing, improving, or reporting a problem ("it's broken", "crashes", "white screen", "works poorly") with an EXISTING service is an EDIT (or question) of THAT service — NOT a new project. Choose "create" ONLY for a clearly new, different service.
 - Project references may be fuzzy or transliterated — e.g. «тамагочи» / "tamagochi" refers to an existing "tamagotchi-web-app". Match the message to the closest existing project before considering create.
 - If a project is CONNECTED (see below), the user is actively working on it: edits and questions almost always refer to it — use it and set confidence "high".
+- If "Recent conversation" is shown, the message may be a FOLLOW-UP ("explain what's here", "and the port?", "why so much?"). Resolve it against that context — usually a "question" about the project just discussed there — instead of treating it as a brand-new request.
 - confidence: "high" when you are sure. "low" when you are NOT sure whether it is a new project vs a change to an existing one, or which project it refers to. When unsure, still give your best guess for kind/slug but mark confidence "low" so the system can confirm.
 - If the user clearly means the connected project but doesn't name it, use it; otherwise use "". If nothing fits, reply {"kind":"none"}.`;
 
@@ -185,15 +186,19 @@ export async function routeMessage(
   slugs: string[],
   focusedSlug: string | null,
   serverContext = false,
+  history?: string,
 ): Promise<Route> {
   // In the 🛠 Server room, bias the model toward devops ops: bare/ambiguous or
   // operational messages are server actions there, not new projects.
   const contextLine = serverContext
     ? 'The user is in the SERVER/admin context: prefer a devops op for operational or ambiguous messages; choose create/edit/question ONLY if the message clearly describes building or changing an app.\n'
     : '';
+  // Recent dialogue so a follow-up ("explain what's here", "and the port?") is
+  // classified in context — e.g. a question about the project just discussed.
+  const historyBlock = history ? `Recent conversation (oldest first):\n${history}\n` : '';
   const reply = await llm({
     system: ROUTER_SYSTEM,
-    user: `Projects: ${slugs.join(', ') || '(none)'}\nConnected project: ${focusedSlug ?? '(none)'}\n${contextLine}Message: ${text}`,
+    user: `Projects: ${slugs.join(', ') || '(none)'}\nConnected project: ${focusedSlug ?? '(none)'}\n${contextLine}${historyBlock}Message: ${text}`,
     validate: validateRouterReply,
   });
   if (!reply) return { kind: 'none' };
@@ -400,4 +405,34 @@ const QUESTION_START = /^(how|what|why|when|where|which|who|does|do|is|are|can|c
 export function looksLikeQuestion(text: string): boolean {
   const t = text.trim();
   return t.endsWith('?') || QUESTION_START.test(t);
+}
+
+// Terse continuation phrases that aren't question-shaped but clearly extend the
+// dialogue ("more", "go on", "подробнее"). Only meaningful with prior context.
+const FOLLOWUP_RE = /^(подробн|поясни|ещё|еще|дальше|продолж|и что|а что|а как|а почему|а где|details?|more|go on|continue|tell me more|и дальше)/i;
+
+/** A bare continuation of the dialogue (not necessarily a question). */
+export function isFollowup(text: string): boolean {
+  return FOLLOWUP_RE.test(text.trim());
+}
+
+/**
+ * When the router classified a message as {none}, decide how to recover:
+ *  - 'question' — a question/continuation AND a recently-discussed PROJECT, so
+ *    answer it about that project (read-only) instead of guessing.
+ *  - 'chat' — admin room, no project, but there IS prior dialogue: answer the
+ *    server/admin follow-up from the transcript (general admin assistant).
+ *  - 'ops' — operational phrasing, or the admin room with nothing to ground on:
+ *    clarify toward server/project ops (NOT "new app?", meaningless in admin).
+ *  - 'authoring' — outside the admin room with no recent context: the genuine
+ *    new-vs-existing build ambiguity.
+ * Pure so it's unit-tested without a bot.
+ */
+export type NoneFallback = 'question' | 'chat' | 'ops' | 'authoring';
+export function noneFallback(text: string, haveRecent: boolean, inServer: boolean, haveHistory: boolean): NoneFallback {
+  const followup = looksLikeQuestion(text) || isFollowup(text);
+  if (haveRecent && followup) return 'question';
+  if (inServer && haveHistory && followup) return 'chat';
+  if (inServer || looksOperational(text)) return 'ops';
+  return 'authoring';
 }

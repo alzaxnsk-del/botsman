@@ -532,11 +532,14 @@ export class Orchestrator {
    * outside the serialized task queue (no write race), so questions stay snappy
    * even while a deploy is in flight.
    */
-  async askProject(slug: string, question: string): Promise<{ ok: boolean; answer: string; costUsd?: number }> {
+  async askProject(slug: string, question: string, history?: string): Promise<{ ok: boolean; answer: string; costUsd?: number }> {
     const project = this.store.getProject(slug);
     if (!project) return { ok: false, answer: `Project ${slug} not found.` };
     const logs = await this.deployEngine.containerLogs(slug, 40).catch(() => '');
     const context = [
+      // Prior dialogue first, so a follow-up ("explain what's here") is read in
+      // context of what was just shown/asked rather than answered from scratch.
+      history ? `Recent conversation in this chat (oldest first); the user may be following up:\n${history}` : '',
       `Project slug: ${slug}. Public URL: https://${project.domain}/`,
       logs ? `Recent container logs (last lines):\n${logs.slice(-2000)}` : '',
     ].filter(Boolean);

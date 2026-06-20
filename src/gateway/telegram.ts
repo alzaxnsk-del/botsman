@@ -15,9 +15,10 @@ import {
   detectProjectAction, detectServerAction, inServerRoom, setServerRoom, clearServerRoom,
   type Room, type ServerAction,
 } from './rooms.js';
+import { conversationContext, recordExchange, clearConversation } from './convo.js';
 import {
   routeMessage, runReadOp, runMutatingOp, looksOperational, looksLikeQuestion, missingSlugPrompt,
-  runDevOpsConfirm, opLiteral,
+  runDevOpsConfirm, opLiteral, noneFallback,
   type DevOpsOp, type DevOpsOpId, type DevOpsDeps, type Route,
 } from './devops.js';
 import { homeStatusLines, homeKeyboard, degradedNoneMessage } from './home.js';
@@ -500,10 +501,17 @@ export class TelegramGateway {
         await this.bot.api.editMessageText(
           chatId, entry.messageId, outcome.ok ? `🗑 ${outcome.summary}` : `❌ ${outcome.error}`,
         ).catch(() => {});
-        // If we just deleted the connected project, restore the global bar so the
-        // keyboard matches reality (an editMessageText can't carry a reply keyboard).
-        if (outcome.ok && wasConnected) {
-          await ctx.reply('🚪 Back to Home — that project is gone.', { reply_markup: roomKeyboard() }).catch(() => {});
+        if (outcome.ok) {
+          // The project is gone — don't let a stale transcript or last_active
+          // pointer make a follow-up resolve to a project that no longer exists.
+          if (this.store.kvGet(`last_active:${chatId}`) === entry.slug) this.store.kvSet(`last_active:${chatId}`, '');
+          if (wasConnected) {
+            // Deleting the connected project is an effective return to Home →
+            // fresh dialogue + restore the global bar (an editMessageText can't
+            // carry a reply keyboard).
+            clearConversation(this.store, chatId);
+            await ctx.reply('🚪 Back to Home — that project is gone.', { reply_markup: roomKeyboard() }).catch(() => {});
+          }
         }
         return;
       }
@@ -625,6 +633,16 @@ export class TelegramGateway {
   /** Connect to a project (explicit, sticky context) or disconnect (🏠). */
   private async switchRoom(ctx: Context, room: Room): Promise<void> {
     const chatId = ctx.chat!.id;
+    // A real room change starts a fresh dialogue ("within the current dialogue"),
+    // so memory must not leak across rooms. But a no-op re-tap of the room you're
+    // already in must NOT wipe a dialogue in progress.
+    const curFocus = getFocus(this.store, chatId);
+    const curServer = inServerRoom(this.store, chatId);
+    const sameRoom =
+      (room.kind === 'project' && curFocus === room.slug) ||
+      (room.kind === 'devops' && curServer) ||
+      (room.kind === 'home' && !curFocus && !curServer);
+    if (!sameRoom) clearConversation(this.store, chatId);
     if (room.kind === 'project') {
       clearServerRoom(this.store, chatId);
       setFocus(this.store, chatId, room.slug);
@@ -749,6 +767,13 @@ export class TelegramGateway {
     // suggestion buttons (see dispatchRoute 'none' / fallbackNoLlm).
     const focused = inServer ? null : getFocus(this.store, chatId);
 
+    // Conversation memory: read the dialogue SO FAR (before this message). The
+    // router and askProject get the prior turns so a follow-up ("explain what's
+    // here") carries context — in a project AND in the 🛠 Server room. The turn
+    // itself is recorded as a clean user→bot PAIR at each answer point (so the
+    // transcript never drifts with dangling, unanswered user lines).
+    const history = conversationContext(this.store, chatId);
+
     // No-LLM authoring fast-path. Only HIGH-confidence, SAFE shortcuts here —
     // anything brittle goes to the LLM router (which gates ops behind a confirm).
     // Skipped in the server room: there a bare message means a server op, not
@@ -765,8 +790,8 @@ export class TelegramGateway {
     if (!this.structuredLlm) return this.fallbackNoLlm(ctx, text, focused, inServer);
 
     const thinking = await ctx.reply('💭 …');
-    const route = await routeMessage(this.structuredLlm, text, slugs, focused, inServer);
-    await this.dispatchRoute(ctx, route, text, focused, thinking.message_id);
+    const route = await routeMessage(this.structuredLlm, text, slugs, focused, inServer, history ?? undefined);
+    await this.dispatchRoute(ctx, route, text, focused, thinking.message_id, history);
   }
 
   /**
@@ -814,7 +839,7 @@ export class TelegramGateway {
   }
 
   private async dispatchRoute(
-    ctx: Context, route: Route, text: string, focused: string | null, thinkingId: number,
+    ctx: Context, route: Route, text: string, focused: string | null, thinkingId: number, history: string | null = null,
   ): Promise<void> {
     const chatId = ctx.chat!.id;
     switch (route.kind) {
@@ -839,8 +864,14 @@ export class TelegramGateway {
         return void this.runTask('edit', route.slug, route.instruction, ctx);
       case 'question': {
         await this.bot.api.editMessageText(chatId, thinkingId, '🤔 Looking into it…').catch(() => {});
-        const res = await this.orchestrator.askProject(route.slug, route.question);
-        return void this.editMdSafe(chatId, thinkingId, res.answer || 'No answer.');
+        const res = await this.orchestrator.askProject(route.slug, route.question, history ?? undefined);
+        // Keep the conversation's subject warm so a bare follow-up ("explain
+        // what's here") attaches to this project instead of becoming an authoring
+        // prompt — works even in the admin room, where focus is null.
+        this.store.kvSet(`last_active:${chatId}`, route.slug);
+        const answer = res.answer || 'No answer.';
+        recordExchange(this.store, chatId, text, answer);
+        return void this.editMdSafe(chatId, thinkingId, answer);
       }
       case 'delete': {
         // Natural-language delete → the same tap-to-confirm buttons as /delete,
@@ -854,10 +885,16 @@ export class TelegramGateway {
       }
       case 'devops': {
         const op = route.op;
+        // A devops op naming a project keeps it as the warm subject, so a
+        // follow-up question ("explain what's here") attaches to it.
+        if (op.slug) this.store.kvSet(`last_active:${chatId}`, op.slug);
         const need = missingSlugPrompt(op);
         if (need) return void this.bot.api.editMessageText(chatId, thinkingId, need).catch(() => {});
         if (!op.mutating) {
           const result = await runReadOp(op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
+          // Record the read result (e.g. a Dockerfile/logs dump) so a follow-up
+          // ("explain what's here") is answered with it in view.
+          recordExchange(this.store, chatId, text, result);
           return void this.editMdSafe(chatId, thinkingId, result);
         }
         const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
@@ -876,23 +913,70 @@ export class TelegramGateway {
           await this.bot.api.editMessageText(chatId, thinkingId, degraded).catch(() => {});
           return;
         }
-        // Couldn't classify: bias the clarification by what the text looked like.
-        if (looksOperational(text)) {
-          await this.bot.api.editMessageText(
-            chatId, thinkingId,
-            "I didn't catch a server action. Try: show load · containers · logs <project> · doctor <project> · " +
-            'restart <project> · redeploy <project> · rollback <project> · restart proxy · clean disk · update botsman · update host.',
-          ).catch(() => {});
-          return;
-        }
-        const kb = new InlineKeyboard().text('🆕 New project', 'intent:new');
         const recent = focused ?? this.store.kvGet(`last_active:${chatId}`);
-        if (recent && this.store.projectExists(recent)) kb.text(`✏️ Edit ${recent}`, `intent:edit:${recent}`);
-        await this.bot.api.editMessageText(chatId, thinkingId, 'Is this a new project, or a change to an existing one?', { reply_markup: kb }).catch(() => {});
-        this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text });
+        const haveRecent = !!recent && this.store.projectExists(recent);
+        const inServer = inServerRoom(this.store, chatId);
+        switch (noneFallback(text, haveRecent, inServer, !!history)) {
+          case 'question': {
+            // A follow-up question with no explicit target → answer it about the
+            // project we were just discussing (read-only). Fixes "объясни, что
+            // тут" after asking about a project, incl. in the admin room.
+            await this.bot.api.editMessageText(chatId, thinkingId, '🤔 Looking into it…').catch(() => {});
+            const res = await this.orchestrator.askProject(recent!, text, history ?? undefined);
+            this.store.kvSet(`last_active:${chatId}`, recent!);
+            const answer = res.answer || 'No answer.';
+            recordExchange(this.store, chatId, text, answer);
+            return void this.editMdSafe(chatId, thinkingId, answer);
+          }
+          case 'chat': {
+            // Admin room, no project in scope, but there IS a dialogue → answer
+            // the server/admin follow-up from the transcript (e.g. "show load"
+            // then "is that a lot?"). General assistant, no project needed.
+            await this.bot.api.editMessageText(chatId, thinkingId, '🤔 …').catch(() => {});
+            const answer = await this.answerAdmin(text, history!);
+            recordExchange(this.store, chatId, text, answer);
+            return void this.editMdSafe(chatId, thinkingId, answer);
+          }
+          case 'ops':
+            // Operational phrasing or the admin room with nothing to ground on:
+            // clarify toward server/project ops — never "new app or edit?".
+            await this.bot.api.editMessageText(
+              chatId, thinkingId,
+              "I didn't catch that. Try a server action — show load · containers · logs <project> · doctor <project> · " +
+              'restart <project> · rollback <project> · restart proxy · clean disk · update botsman — or name a project to ask about it.',
+            ).catch(() => {});
+            return;
+          case 'authoring': {
+            const kb = new InlineKeyboard().text('🆕 New project', 'intent:new');
+            if (haveRecent) kb.text(`✏️ Edit ${recent}`, `intent:edit:${recent}`);
+            await this.bot.api.editMessageText(chatId, thinkingId, 'Is this a new project, or a change to an existing one?', { reply_markup: kb }).catch(() => {});
+            this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text });
+            return;
+          }
+        }
         return;
       }
     }
+  }
+
+  /** General admin/server assistant: answer a server-room follow-up from the
+   *  conversation transcript when no project is in scope (e.g. "show load" then
+   *  "is that a lot?"). Uses the structured LLM with a JSON envelope so it works
+   *  in both auth modes. Grounded ONLY in the dialogue — it doesn't run ops. */
+  private async answerAdmin(question: string, history: string): Promise<string> {
+    if (!this.structuredLlm) return "I can't answer that right now — the AI router is unavailable.";
+    const reply = await this.structuredLlm<{ answer: string }>({
+      system:
+        "You are Botsman's server-admin assistant. Answer the user's question about their server or projects using ONLY the recent conversation below; be concise and practical, and never invent data you weren't shown. Reply in the user's language. Reply with ONLY a JSON object: {\"answer\":\"…\"}.",
+      user: `Recent conversation (oldest first):\n${history}\n\nQuestion: ${question}`,
+      validate: (raw) => {
+        const a = (raw as { answer?: unknown })?.answer;
+        return typeof a === 'string' && a.trim() ? { answer: a } : null;
+      },
+      maxTokens: 700,
+    });
+    return reply?.answer
+      ?? "I couldn't work that out from our conversation. Try a server action, or name a project to ask about it.";
   }
 
   /** No LLM configured: deterministic best effort using detectIntent. */
@@ -1017,6 +1101,9 @@ export class TelegramGateway {
     if (!op.mutating) {
       const thinking = await ctx.reply(`⏳ ${op.humanSummary}…`);
       const result = await runReadOp(op, this.devopsDeps()).catch((e) => `Error: ${(e as Error).message}`);
+      // Record the tap + its result so a typed follow-up ("is that a lot?") after
+      // a one-tap (📊 Load / 🐳 Containers) is answered with the output in view.
+      recordExchange(this.store, chatId, op.humanSummary, result);
       await this.editMdSafe(chatId, thinking.message_id, result);
       return;
     }
@@ -1266,6 +1353,9 @@ export class TelegramGateway {
         // (switchRoom coordinates both) — clear the server flag too, or the bar
         // would show the project while routing stayed biased to admin ops.
         clearServerRoom(this.store, chatId);
+        // Connecting to a freshly-built project is a fresh dialogue, like a room
+        // switch — drop the pre-build transcript so it can't leak into it.
+        clearConversation(this.store, chatId);
         setFocus(this.store, chatId, outcome.slug);
         await ctx.reply(
           `🔗 Connected to ${outcome.slug} — changes ("add a dark theme") and questions go straight to it now. Tap 🚪 Exit to disconnect.`,

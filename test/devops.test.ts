@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  routeMessage, looksOperational, looksLikeQuestion, OP_META, summarize,
+  routeMessage, looksOperational, looksLikeQuestion, noneFallback, isFollowup, OP_META, summarize,
   runDevOpsConfirm, runMutatingOp, type ConfirmIO, type PendingDevOps, type DevOpsOp, type DevOpsDeps,
 } from '../src/gateway/devops.js';
 import type { StructuredLlm } from '../src/llm.js';
@@ -257,5 +257,45 @@ describe('runMutatingOp self_update (messaging + back-online notice)', () => {
     const msg = await runMutatingOp(op, deps);
     expect(msg).toContain('timed out');
     expect(store.kvGet(RESTART_NOTICE_KEY)).toBe('');
+  });
+});
+
+describe('isFollowup', () => {
+  it('matches terse continuations that are not question-shaped', () => {
+    for (const t of ['подробнее', 'ещё', 'дальше', 'продолжай', 'more', 'go on', 'continue', 'details']) {
+      expect(isFollowup(t)).toBe(true);
+    }
+  });
+  it('does not match a fresh build/op request', () => {
+    expect(isFollowup('make me a todo app')).toBe(false);
+    expect(isFollowup('restart todo')).toBe(false);
+  });
+});
+
+describe('noneFallback (recovering an unclassified message)', () => {
+  it('answers a follow-up about the recent PROJECT — even in the admin room', () => {
+    // The reported bug: "объясни, что тут" right after asking about a project,
+    // in the Server room, used to become a "new project or edit?" prompt.
+    expect(noneFallback('объясни, что тут', true, true, true)).toBe('question');
+    expect(noneFallback('explain what this does', true, false, false)).toBe('question');
+    expect(noneFallback('подробнее', true, true, true)).toBe('question'); // non-question continuation
+  });
+
+  it('admin room with prior dialogue but NO project → general admin chat', () => {
+    // "show load" then "is that a lot?" — no project, but the load dump is in history.
+    expect(noneFallback('это нормально?', false, true, true)).toBe('chat');
+    expect(noneFallback('подробнее', false, true, true)).toBe('chat');
+  });
+
+  it('admin room with no history and no project → ops clarification (not authoring)', () => {
+    expect(noneFallback('what is this?', false, true, false)).toBe('ops');
+    expect(noneFallback('do the thing', false, true, false)).toBe('ops');
+    expect(noneFallback('блаблабла', false, true, true)).toBe('ops'); // history but not a follow-up
+  });
+
+  it('operational phrasing → ops; plain authoring outside admin → authoring', () => {
+    expect(noneFallback('restart the proxy thingy', false, false, false)).toBe('ops');
+    expect(noneFallback('make me a todo app', false, false, false)).toBe('authoring');
+    expect(noneFallback('what is this?', false, false, false)).toBe('authoring');
   });
 });
