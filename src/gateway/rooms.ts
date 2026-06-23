@@ -69,12 +69,12 @@ export function projectKeyboard(): ReturnType<Keyboard['persistent']> {
   return new Keyboard()
     .text('🚪 Exit').text('🔍 Review').text('💻 Claude Code')
     .row()
-    .text('📋 Logs').text('↩️ Rollback')
+    .text('📋 Logs').text('↩️ Rollback').text('🌐 Domain')
     .resized()
     .persistent();
 }
 
-export type ProjectAction = 'exit' | 'review' | 'logs' | 'rollback' | 'code';
+export type ProjectAction = 'exit' | 'review' | 'logs' | 'rollback' | 'code' | 'domain';
 
 // Exact button labels (+ a few unambiguous typed synonyms), anchored so a
 // multi-word edit that merely mentions "review"/"logs" is NOT hijacked. Kept
@@ -85,6 +85,9 @@ const REVIEW_RE = /^(🔍\s*)?(review|ревью)$/i;
 const PLOGS_RE = /^(📋\s*)?(logs|логи)$/i;
 const ROLLBACK_RE = /^(↩️\s*)?(rollback|откат|откатить)$/i;
 const CODE_RE = /^(💻\s*)?(claude\s*code|clone|клонировать|local\s*dev|локально)$/i;
+// Anchored single-word tap only — a multi-word "смени домен на X" is NOT a tap
+// (it carries a target) and must reach the change-domain flow, not this info card.
+const DOMAIN_RE = /^(🌐\s*)?(domain|домен)$/i;
 
 /** Map a project-context keyboard tap to its action, or null. */
 export function detectProjectAction(text: string): ProjectAction | null {
@@ -94,6 +97,7 @@ export function detectProjectAction(text: string): ProjectAction | null {
   if (PLOGS_RE.test(t)) return 'logs';
   if (ROLLBACK_RE.test(t)) return 'rollback';
   if (CODE_RE.test(t)) return 'code';
+  if (DOMAIN_RE.test(t)) return 'domain';
   return null;
 }
 

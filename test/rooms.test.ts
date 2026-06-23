@@ -80,6 +80,7 @@ describe('detectProjectAction', () => {
     expect(detectProjectAction('📋 Logs')).toBe('logs');
     expect(detectProjectAction('↩️ Rollback')).toBe('rollback');
     expect(detectProjectAction('💻 Claude Code')).toBe('code');
+    expect(detectProjectAction('🌐 Domain')).toBe('domain');
   });
 
   it('accepts bare-word and Russian synonyms', () => {
@@ -87,6 +88,7 @@ describe('detectProjectAction', () => {
     expect(detectProjectAction('ревью')).toBe('review');
     expect(detectProjectAction('логи')).toBe('logs');
     expect(detectProjectAction('откат')).toBe('rollback');
+    expect(detectProjectAction('домен')).toBe('domain');
   });
 
   it('does NOT hijack a multi-word edit that merely mentions a keyword', () => {
@@ -94,13 +96,16 @@ describe('detectProjectAction', () => {
     expect(detectProjectAction('add a logs page')).toBeNull();
     expect(detectProjectAction('rollback the header color change')).toBeNull();
     expect(detectProjectAction('make it dark')).toBeNull();
+    // A real "смени домен на X" carries a target → not a bare tap (it reaches the
+    // change-domain flow via looksLikeDomainChange instead).
+    expect(detectProjectAction('смени домен на landing')).toBeNull();
   });
 });
 
 describe('projectKeyboard', () => {
-  it('has exactly the five project-action buttons', () => {
+  it('has exactly the six project-action buttons', () => {
     const labels = projectKeyboard().keyboard.flat().map((b) => (b as { text: string }).text);
-    expect(labels).toEqual(['🚪 Exit', '🔍 Review', '💻 Claude Code', '📋 Logs', '↩️ Rollback']);
+    expect(labels).toEqual(['🚪 Exit', '🔍 Review', '💻 Claude Code', '📋 Logs', '↩️ Rollback', '🌐 Domain']);
   });
 });
 

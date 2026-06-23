@@ -1,5 +1,41 @@
 import { describe, it, expect } from 'vitest';
-import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject } from '../src/intent.js';
+import { detectIntent, looksLikeCreate, looksLikeDelete, looksLikeDomainChange, parseDomainTarget, findSimilarProject } from '../src/intent.js';
+
+describe('looksLikeDomainChange (keeps domain changes out of the edit fast-path)', () => {
+  it('flags change-the-domain messages (RU + EN)', () => {
+    expect(looksLikeDomainChange('смени домен на landing')).toBe(true);
+    expect(looksLikeDomainChange('измени домен проекта botsman-landing на landing.botsman.dev')).toBe(true);
+    expect(looksLikeDomainChange('поменяй поддомен на shop')).toBe(true);
+    expect(looksLikeDomainChange('change the domain to landing')).toBe(true);
+    expect(looksLikeDomainChange('rename the subdomain to shop')).toBe(true);
+    expect(looksLikeDomainChange('set domain landing')).toBe(true);
+  });
+
+  it('does NOT flag a code edit that merely mentions a domain', () => {
+    // "add" is not a change verb → this stays an ordinary edit.
+    expect(looksLikeDomainChange('add a domain input field to the form')).toBe(false);
+    expect(looksLikeDomainChange('добавь поле для домена в форму')).toBe(false);
+    expect(looksLikeDomainChange('add a dark theme')).toBe(false);
+    expect(looksLikeDomainChange('сделай лендинг для домена')).toBe(false); // create-phrased, no change verb
+  });
+});
+
+describe('parseDomainTarget', () => {
+  it('extracts the target after на/to', () => {
+    expect(parseDomainTarget('смени домен на landing')).toBe('landing');
+    expect(parseDomainTarget('change the domain to landing.botsman.dev')).toBe('landing.botsman.dev');
+  });
+  it('strips a scheme and trailing slash', () => {
+    expect(parseDomainTarget('смени домен на https://landing.botsman.dev/')).toBe('landing.botsman.dev');
+  });
+  it('finds a bare full-host token when there is no на/to', () => {
+    expect(parseDomainTarget('домен landing.botsman.dev пожалуйста')).toBe('landing.botsman.dev');
+  });
+  it('returns null when the target is a non-ASCII word (ask for the address)', () => {
+    expect(parseDomainTarget('смени домен на новый')).toBe(null);
+    expect(parseDomainTarget('смени домен')).toBe(null);
+  });
+});
 
 describe('looksLikeDelete (keeps delete out of the edit fast-path)', () => {
   it('flags delete-phrased messages (EN + RU)', () => {

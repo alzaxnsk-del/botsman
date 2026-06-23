@@ -73,6 +73,39 @@ export function looksLikeDelete(text: string): boolean {
   return DELETE_VERBS.test(text.trim().toLowerCase());
 }
 
+// "change the project's DOMAIN" — kept out of the edit fast-path (a domain
+// change is NOT a code edit; it re-points the live Caddy route). Requires BOTH a
+// domain noun AND a change verb so a real edit that merely mentions a "domain
+// input field" ("add a domain field") isn't hijacked ("add" is not a change
+// verb). A false positive only costs a clarifying reply — the flow validates the
+// target and never mutates on junk — so this can lean liberal. No \b (Cyrillic).
+const DOMAIN_NOUN = /(поддомен|домен|subdomain|domain)/i;
+const DOMAIN_CHANGE_VERB = /(смен|измен|поменя|переимен|перенес|change|rename|switch|(^|\s)set(\s|$))/i;
+
+export function looksLikeDomainChange(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  return DOMAIN_NOUN.test(t) && DOMAIN_CHANGE_VERB.test(t);
+}
+
+/**
+ * Extract the requested new domain from a change-domain message: the token after
+ * "на"/"to"/"→", else a bare full-host token anywhere. ASCII-only on purpose —
+ * a Cyrillic word after "на" (e.g. «смени домен на новый») isn't a domain, so it
+ * returns null and the caller asks for the actual address. Validation/scope
+ * checks live in domain.ts; this only finds the candidate token.
+ */
+export function parseDomainTarget(text: string): string | null {
+  const t = text.replace(/https?:\/\//gi, ' ');
+  const after = t.match(/(?:(?:^|\s)на\s|(?:^|\s)to\s|->|=>)\s*([a-z0-9][a-z0-9.-]*)/i);
+  if (after) {
+    const tok = after[1].replace(/[.-]+$/, '');
+    if (/[a-z0-9]/i.test(tok)) return tok;
+  }
+  const host = t.match(/(^|\s)([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+)(\s|$)/i);
+  if (host) return host[2];
+  return null;
+}
+
 const NOISE_TOKENS = new Set(['web', 'app', 'application', 'service', 'api', 'site', 'bot', 'server', 'review', 'app2']);
 
 /**

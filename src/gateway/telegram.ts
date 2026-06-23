@@ -5,9 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { logger } from '../logger.js';
 import { paths } from '../paths.js';
-import { detectIntent, looksLikeCreate, looksLikeDelete, findSimilarProject } from '../intent.js';
+import { detectIntent, looksLikeCreate, looksLikeDelete, looksLikeDomainChange, parseDomainTarget, findSimilarProject } from '../intent.js';
 import { isValidSlug } from '../slug.js';
-import { runDoctor, serverPublicIp, type FixId } from '../doctor.js';
+import { runDoctor, serverPublicIp, probeHostDns, type FixId, type HostDnsProbe } from '../doctor.js';
+import { resolveProjectDomain, baseOf } from '../domain.js';
 import { updateConfigFile } from '../config.js';
 import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
 import {
@@ -36,7 +37,7 @@ import {
 import { versionLine } from '../version.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
-import type { DeployEngine } from '../deploy/engine.js';
+import type { DeployEngine, DomainChangeResult } from '../deploy/engine.js';
 import { RESTART_NOTICE_KEY, SETUP_BACKUP_KEY, PREFLIGHT_WARNINGS_KEY, type Stage } from '../types.js';
 
 const STAGE_LABELS: Record<Stage, string> = {
@@ -82,6 +83,8 @@ export class TelegramGateway {
   private pendingAmbiguous = new Map<number, { messageId: number; text: string; attachment?: TaskAttachment }>();
   /** DevOps op awaiting a confirm button; messageId guards stale clicks. */
   private pendingDevOps = new Map<number, { messageId: number; op: DevOpsOp; confirmed: boolean }>();
+  /** A domain change awaiting its ✅ confirm; messageId guards stale clicks. */
+  private pendingDomainChange = new Map<number, { messageId: number; slug: string; host: string }>();
   /** A failed task offering a 🔁 Retry; messageId guards stale buttons. Keeps the
    *  attachment so a retried image build re-delivers the reference file. */
   private pendingRetry = new Map<number, { messageId: number; kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachment?: TaskAttachment }>();
@@ -481,6 +484,69 @@ export class TelegramGateway {
         return;
       }
 
+      // Domain change confirm / cancel (tap-to-confirm, messageId-guarded so a
+      // stale card can't fire). Switches the live Caddy route and persists the
+      // new domain only AFTER the route switch succeeds.
+      if (data === 'domain:exec' || data === 'domain:cancel') {
+        const entry = this.pendingDomainChange.get(chatId);
+        if (!entry || entry.messageId !== ctx.callbackQuery.message?.message_id) {
+          return void ctx.answerCallbackQuery({ text: 'This button is stale.' });
+        }
+        this.pendingDomainChange.delete(chatId);
+        if (data === 'domain:cancel') {
+          await ctx.answerCallbackQuery({ text: 'Cancelled' });
+          await this.bot.api.editMessageText(chatId, entry.messageId, 'Domain change cancelled.').catch(() => {});
+          return;
+        }
+        const project = this.store.getProject(entry.slug);
+        if (!project) {
+          await ctx.answerCallbackQuery({ text: 'Project no longer exists.' });
+          await this.bot.api.editMessageText(chatId, entry.messageId, `Project ${entry.slug} no longer exists.`).catch(() => {});
+          return;
+        }
+        await ctx.answerCallbackQuery({ text: 'Switching…' });
+        const base = `🌐 Pointing ${entry.slug} at ${entry.host} and issuing TLS…`;
+        await this.bot.api.editMessageText(chatId, entry.messageId, base).catch(() => {});
+        const stopHb = this.startHeartbeat(chatId, entry.messageId, base);
+        const r: DomainChangeResult = await this.deployEngine
+          .changeDomain(project, entry.host)
+          .catch((e) => ({ ok: false, live: false, error: (e as Error).message }));
+        stopHb();
+        if (!r.ok) {
+          await this.bot.api.editMessageText(
+            chatId, entry.messageId,
+            `❌ Couldn't change the domain: ${r.error}\n\nThe old address (${project.domain}) is untouched and still serving.`,
+          ).catch(() => {});
+          return;
+        }
+        // Route switch (or no-op) succeeded → make the new address the truth.
+        this.store.updateProject(entry.slug, { domain: entry.host });
+        this.store.kvSet(`last_active:${chatId}`, entry.slug);
+        if (!r.live) {
+          await this.editMdSafe(
+            chatId, entry.messageId,
+            `✓ Saved *${entry.slug}*'s address as ${entry.host}.\nThe service isn't running right now, so I couldn't switch the live route — it takes effect on the next deploy.`,
+          );
+          return;
+        }
+        const lines = [
+          `✅ *${entry.slug}* — domain changed`,
+          `https://${entry.host}/`,
+          '',
+          `The old address (${project.domain}) no longer serves this project.`,
+        ];
+        if (r.publicWarning) lines.push('', `⚠️ ${r.publicWarning}`);
+        const fixKb = r.publicWarning ? this.doctorKeyboard(entry.slug, ['proxy', 'recheck']) : undefined;
+        await this.bot.api.editMessageText(chatId, entry.messageId, lines.join('\n'), {
+          parse_mode: 'Markdown',
+          link_preview_options: { is_disabled: true },
+          reply_markup: fixKb,
+        }).catch(async () => {
+          await this.bot.api.editMessageText(chatId, entry.messageId, lines.join('\n'), { reply_markup: fixKb }).catch(() => {});
+        });
+        return;
+      }
+
       // Delete confirm / cancel (tap, not type — a stray "yes"/"да" can't delete,
       // and a natural "yes, delete it" is no longer silently lost).
       if (data === 'delete:exec' || data === 'delete:cancel') {
@@ -595,6 +661,7 @@ export class TelegramGateway {
         if (action === 'review') return void this.reviewProject(ctx, connected);
         if (action === 'logs') return void this.sendLogs(ctx, connected);
         if (action === 'code') return void this.sendLocalDevInfo(ctx, connected);
+        if (action === 'domain') return void this.sendDomainInfo(ctx, connected);
         if (action === 'rollback') {
           // Mutating → confirm first so a stray keyboard tap can't roll back.
           return void this.promptMutatingOp(ctx, opLiteral('rollback_service', connected));
@@ -757,6 +824,11 @@ export class TelegramGateway {
       await ctx.reply('Tell me what to build or change — or ask about a project or the server.');
       return;
     }
+    // Changing a project's DOMAIN is a route operation, not a code edit — handle
+    // it deterministically (works with the LLM router down) before anything can
+    // misroute it to the coding agent, which would only edit canonical-URL
+    // strings in the source and falsely report the address as changed.
+    if (looksLikeDomainChange(text)) return void this.handleDomainChange(ctx, text);
     const slugs = this.store.listProjects().map((p) => p.slug);
     const inServer = inServerRoom(this.store, chatId);
     // Only an EXPLICIT connection (focus) silently routes a bare follow-up to a
@@ -1091,6 +1163,100 @@ export class TelegramGateway {
     const hostHome = process.env.BOTSMAN_HOST_DIR ?? '~/.botsman';
     const host = (await serverPublicIp()) ?? '<server>';
     await this.replyMdSafe(ctx, localDevInstructions({ slug, hostHome, host, domain: p.domain }));
+  }
+
+  /** 🌐 Domain one-tap: show the current address and how to change it. Tapping
+   *  the keyboard button carries no target, so this is an info card, not a
+   *  capture step — the user then sends "смени домен на <label>". */
+  private async sendDomainInfo(ctx: Context, slug: string): Promise<void> {
+    const p = this.store.getProject(slug);
+    if (!p) return void ctx.reply(`Project ${slug} not found.`);
+    const base = baseOf(p.domain);
+    await this.replyMdSafe(
+      ctx,
+      `🌐 *${slug}* is served at:\nhttps://${p.domain}/\n\n` +
+        `To change it, just say e.g. «смени домен на landing» or "change the domain to landing". ` +
+        `It must be a subdomain of \`${base}\` (the wildcard \`*.${base}\` already points here).`,
+    );
+  }
+
+  /**
+   * Free-text "change a project's domain" → a tap-to-confirm card. Resolves the
+   * target project (an explicitly named slug, else the connected one) and the
+   * new address (the token after "на"/"to", else a bare host), validates scope
+   * (subdomain of THIS project's base, valid label, not taken), probes DNS for a
+   * non-blocking heads-up, then asks to confirm. Deterministic so it works with
+   * the LLM router down.
+   */
+  private async handleDomainChange(ctx: Context, text: string): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const slugs = this.store.listProjects().map((p) => p.slug);
+    if (!slugs.length) {
+      await ctx.reply("No projects yet — describe one and I'll build it first.");
+      return;
+    }
+    const focused = inServerRoom(this.store, chatId) ? null : getFocus(this.store, chatId);
+    const target = parseDomainTarget(text);
+    const intent = detectIntent(text, slugs, focused);
+    let slug = intent.kind === 'edit' ? intent.slug : null;
+    // Guard the "new label coincides with a project name" case: if the ONLY
+    // resolved slug is the target token itself (e.g. «смени домен на landing»
+    // while a project named "landing" exists), that's the destination — not the
+    // project to change — so fall back to the connected one, else ask.
+    if (slug && target && slug === target.toLowerCase()) {
+      slug = focused && focused !== slug ? focused : null;
+    }
+    if (!slug) {
+      await ctx.reply("Which project's domain do you want to change? Say e.g. «смени домен <project> на landing».");
+      return;
+    }
+    const project = this.store.getProject(slug);
+    if (!project) return void ctx.reply(`Project ${slug} not found.`);
+    const base = baseOf(project.domain);
+    if (!target) {
+      await this.replyMdSafe(
+        ctx,
+        `What should *${slug}*'s new address be? It must be a subdomain of \`${base}\` — e.g. «смени домен ${slug} на landing».`,
+      );
+      return;
+    }
+    const taken = (host: string): string | null =>
+      this.store.listProjects().find((p) => p.slug !== slug && p.domain.toLowerCase() === host)?.slug ?? null;
+    const res = resolveProjectDomain(target, base, project.domain, taken);
+    if (!res.ok) return void this.replyMdSafe(ctx, `🌐 Can't use that: ${res.reason}`);
+    const host = res.host;
+
+    // DNS is a non-blocking heads-up: a new subdomain of an already-working
+    // wildcard base usually resolves immediately, but a proxied/mispointed
+    // record would break TLS, so surface it before the switch.
+    const probe = await probeHostDns(host).catch(() => null);
+    const dnsNote = this.domainDnsNote(probe, host, base);
+    const kb = new InlineKeyboard().text('✅ Change it', 'domain:exec').text('✖️ Cancel', 'domain:cancel');
+    const body =
+      `🌐 Change *${slug}*'s domain?\n\n` +
+      `From: ${project.domain}\nTo: ${host}\n` +
+      (dnsNote ? `\n${dnsNote}\n` : '') +
+      `\nI'll re-point the live route (the old address then stops serving this project) and issue TLS for the new host.`;
+    const sent = await ctx.reply(body, {
+      parse_mode: 'Markdown',
+      link_preview_options: { is_disabled: true },
+      reply_markup: kb,
+    });
+    this.pendingDomainChange.set(chatId, { messageId: sent.message_id, slug, host });
+  }
+
+  /** Turn a DNS probe into a one-line warning for the confirm card, or '' when
+   *  the host already resolves to this server (the common case). */
+  private domainDnsNote(probe: HostDnsProbe | null, host: string, base: string): string {
+    if (!probe || probe.status === 'ok') return '';
+    switch (probe.status) {
+      case 'no-dns':
+        return `⚠️ \`${host}\` doesn't resolve yet. If \`*.${base}\` is a wildcard pointing here it will once DNS propagates; otherwise add the record. I'll still switch the route.`;
+      case 'cloudflare':
+        return `⚠️ \`${host}\` → a Cloudflare proxy address (${probe.ips[0]}). TLS issuance fails until the record is *DNS only* (grey cloud).`;
+      case 'wrong-ip':
+        return `⚠️ \`${host}\` → ${probe.ips.join(', ')}, not this server (${probe.serverIp}). HTTPS won't work until DNS points here.`;
+    }
   }
 
   /** A server-keyboard tap → its devops op. Read-only runs instantly; mutating
