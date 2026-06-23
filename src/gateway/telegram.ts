@@ -170,6 +170,7 @@ export class TelegramGateway {
           '• "make a TODO app" → builds a new service',
           '• "add a dark theme" → changes the one you\'re working on',
           '• "how is this built?" → answers without deploying',
+          '• "change todo\'s domain to landing" → moves it to another subdomain of your base (asks first)',
           '• "show the load" / "restart todo" / "update the server" → server ops (with confirmation)',
           '',
           'The buttons below change with where you are: 🏠 Home, inside a project, or the 🛠 Server room (each shows its own quick actions and 🚪 Exit).',
@@ -727,7 +728,9 @@ export class TelegramGateway {
       // keyboard shows admin actions, until 🚪 Exit. Dangerous ops ask first.
       setServerRoom(this.store, chatId);
       await ctx.reply(
-        '🛠 *Server — admin mode.*\nJust say what you need: "show load", "restart todo", "clean disk", "update". Or tap a button below. I ask before anything risky.\nTap 🚪 Exit to leave.',
+        '🛠 *Server — admin mode.*\nJust say what you need: "show load", "restart todo", "clean disk", "update". Or tap a button below. I ask before anything risky.\n' +
+          'Change a project\'s address too: "change todo\'s domain to landing" — a subdomain of your base (external domains aren\'t supported).\n' +
+          'Tap 🚪 Exit to leave.',
         { parse_mode: 'Markdown', reply_markup: serverKeyboard() },
       );
       return;
