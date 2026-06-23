@@ -137,6 +137,7 @@ There are no modes to remember — write what you want, and Botsman routes it by
 | "make a TODO app" | **builds** and deploys a new service |
 | "add a dark theme" | **changes** the service you're working on and redeploys |
 | "how is this built?", "what's in the logs?" | **answers** — without deploying |
+| "change the domain to landing", "смени домен на shop" | **re-points the project** to a new subdomain (asks first), re-issues TLS |
 | "show the load", "clean up disk", "restart todo", "update the server" | runs **server ops** |
 
 You don't have to type everything: **attach a spec document** (`.md`, `.txt`, source, JSON) and Botsman builds or changes from it, or **send a UI mockup or a screenshot of a bug** and the coding agent uses the image as a visual reference. A caption, if you add one, is your instruction.
@@ -150,7 +151,7 @@ Server reads (metrics, logs, diagnosis) run immediately; anything that changes s
 The persistent buttons below the message box change with where you are — and they're command-driven, so they keep working even if the AI is unreachable (out of quota, network hiccup):
 
 - **🏠 Home** — a control panel: a status line (live projects, anything down, AI-router health, startup warnings) and one-tap buttons — **📊 Server status · 📦 Projects · ⬆️ Update Botsman · 🔧 Setup · 💻 Code on your computer**. To start a new project, just describe it right here.
-- **📦 Connect to a project** (tap one under **📦 Projects**, or say "go to todo") — while connected, every change and question goes straight to it, and the bar becomes project actions: **🔍 Review** (a read-only code pass), **📋 Logs**, **↩️ Rollback** (asks first), **💻 Claude Code** (a ready clone + `claude` + `git push` guide). Tap **🚪 Exit** to disconnect.
+- **📦 Connect to a project** (tap one under **📦 Projects**, or say "go to todo") — while connected, every change and question goes straight to it, and the bar becomes project actions: **🔍 Review** (a read-only code pass), **📋 Logs**, **↩️ Rollback** (asks first), **🌐 Domain** (move it to another subdomain of your base, e.g. `landing.yourdomain.com`), **💻 Claude Code** (a ready clone + `claude` + `git push` guide). Tap **🚪 Exit** to disconnect.
 - **🛠 Server** — admin mode: ask in plain language ("show load", "clean up disk", "update the server"), with one-tap buttons for the common ones. Server reads run immediately; state changes confirm once, host-level actions twice.
 
 Outside a connection, routing is by content and anything ambiguous is confirmed first. The keyboards are an additional reliable surface, not a mode wall — and because taps are deterministic, Home and the room actions work even when the LLM router is down (it tells you so, and points you to Home).

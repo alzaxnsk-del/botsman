@@ -56,6 +56,41 @@ export async function serverPublicIp(): Promise<string | null> {
   return cachedPublicIp;
 }
 
+/** TLS-readiness classification of a host's resolved A-records. */
+export type DnsStatus = 'ok' | 'no-dns' | 'cloudflare' | 'wrong-ip';
+
+/**
+ * Classify resolved IPs for TLS-readiness (pure, so it's unit-tested without
+ * real DNS): does the host resolve at all, is it behind a Cloudflare proxy
+ * (orange cloud — breaks Let's Encrypt issuance), and does it point at THIS
+ * server? Shared by /doctor, onboarding's domain step and the change-domain flow.
+ */
+export function classifyDnsIps(ips: string[], serverIp: string | null): DnsStatus {
+  if (!ips.length) return 'no-dns';
+  if (ips.some(isCloudflareIp)) return 'cloudflare';
+  if (serverIp && !ips.includes(serverIp)) return 'wrong-ip';
+  return 'ok';
+}
+
+export interface HostDnsProbe {
+  status: DnsStatus;
+  /** Resolved A-records (empty when the host doesn't resolve). */
+  ips: string[];
+  /** This server's public IP, or null when undetectable. */
+  serverIp: string | null;
+}
+
+/** Resolve `host` and classify it for TLS-readiness (the IO wrapper around
+ *  classifyDnsIps). Never throws — an unresolvable host comes back as 'no-dns'. */
+export async function probeHostDns(host: string): Promise<HostDnsProbe> {
+  let ips: string[] = [];
+  try {
+    ips = await dns.resolve4(host);
+  } catch { /* no-dns */ }
+  const serverIp = await serverPublicIp().catch(() => null);
+  return { status: classifyDnsIps(ips, serverIp), ips, serverIp };
+}
+
 export type FixId = 'proxy' | 'app' | 'recheck';
 
 export interface DoctorReport {

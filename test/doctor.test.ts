@@ -1,5 +1,24 @@
 import { describe, it, expect } from 'vitest';
-import { isCloudflareIp, classifyPublicError } from '../src/doctor.js';
+import { isCloudflareIp, classifyPublicError, classifyDnsIps } from '../src/doctor.js';
+
+describe('classifyDnsIps', () => {
+  const SERVER = '13.140.167.93';
+  it('flags an unresolvable host', () => {
+    expect(classifyDnsIps([], SERVER)).toBe('no-dns');
+  });
+  it('flags a Cloudflare-proxied record', () => {
+    expect(classifyDnsIps(['104.21.32.1'], SERVER)).toBe('cloudflare');
+  });
+  it('flags a record pointing elsewhere', () => {
+    expect(classifyDnsIps(['203.0.113.10'], SERVER)).toBe('wrong-ip');
+  });
+  it('accepts a record pointing at this server', () => {
+    expect(classifyDnsIps([SERVER], SERVER)).toBe('ok');
+  });
+  it("can't judge the IP when the server IP is unknown → ok", () => {
+    expect(classifyDnsIps(['203.0.113.10'], null)).toBe('ok');
+  });
+});
 
 describe('isCloudflareIp', () => {
   it('detects addresses in Cloudflare ranges', () => {

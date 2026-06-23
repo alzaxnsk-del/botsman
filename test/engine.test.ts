@@ -39,3 +39,35 @@ describe('DockerDeployEngine build guard', () => {
     expect(res.error).toContain('no application source');
   });
 });
+
+describe('DockerDeployEngine.changeDomain', () => {
+  it('reports live=false and never touches the proxy when nothing is running', async () => {
+    let upserts = 0;
+    const docker = { listContainers: async () => [] } as never;
+    const caddy = { upsertRoute: async () => { upserts++; } } as never;
+    const engine = new DockerDeployEngine(docker, caddy, 'apps.test');
+
+    const res = await engine.changeDomain(project('todo'), 'shop.apps.test');
+    expect(res).toEqual({ ok: true, live: false });
+    expect(upserts).toBe(0); // no container → no route switch
+  });
+
+  it('re-points the live route to the running container on the new host', async () => {
+    const calls: Array<{ slug: string; host: string; upstream: string }> = [];
+    const docker = {
+      listContainers: async () => [{ Names: ['/botsman-app-todo-abc'], Id: 'abc' }],
+    } as never;
+    const caddy = {
+      upsertRoute: async (slug: string, host: string, upstream: string) => { calls.push({ slug, host, upstream }); },
+    } as never;
+    const engine = new DockerDeployEngine(docker, caddy, 'apps.test');
+
+    // Tiny smoke window: the test host won't answer, so we get a publicWarning
+    // fast instead of waiting the production 45s.
+    const res = await engine.changeDomain(project('todo'), 'shop.apps.test', { timeoutMs: 30, intervalMs: 10 });
+    expect(res.ok).toBe(true);
+    expect(res.live).toBe(true);
+    expect(res.publicWarning).toBeTruthy(); // unreachable test host
+    expect(calls).toEqual([{ slug: 'todo', host: 'shop.apps.test', upstream: 'botsman-app-todo-abc:3000' }]);
+  });
+});

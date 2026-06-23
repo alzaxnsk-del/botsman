@@ -40,6 +40,24 @@ export interface DeployEngine {
   restartService(slug: string): Promise<void>;
   /** Restart the reverse proxy — retries TLS issuance immediately (one-tap fix). */
   restartProxy(): Promise<void>;
+  /** Re-point a project's public host to `newHost` WITHOUT rebuilding (the
+   *  change-domain flow). Caller persists project.domain. */
+  changeDomain(project: ProjectMeta, newHost: string, opts?: SmokeOpts): Promise<DomainChangeResult>;
+}
+
+export interface SmokeOpts {
+  timeoutMs?: number;
+  intervalMs?: number;
+}
+
+export interface DomainChangeResult {
+  ok: boolean;
+  /** True when a running container was re-routed; false when there was none to
+   *  point at (domain is still saved by the caller, applies on next deploy). */
+  live: boolean;
+  /** Route switched, but the new public URL didn't answer yet (DNS/TLS lag). */
+  publicWarning?: string;
+  error?: string;
 }
 
 /**
@@ -85,7 +103,9 @@ export class DockerDeployEngine implements DeployEngine {
     // Unique per deploy: redeploying the same commit (e.g. a git push with no
     // new changes) must not collide with the running container's name.
     const name = `${this.containerName(slug, commit)}-${Date.now().toString(36).slice(-4)}`;
-    const host = this.hostFor(slug);
+    // project.domain is the source of truth (the change-domain flow can move it
+    // off the default slug.<base>); hostFor is only the creation-time default.
+    const host = project.domain || this.hostFor(slug);
     const db: ProjectDb = { dbName: project.dbName, dbUser: project.dbUser, dbPassword: project.dbPassword };
 
     try {
@@ -150,7 +170,7 @@ export class DockerDeployEngine implements DeployEngine {
     }
     // Unique suffix: repeated rollbacks to the same commit must not collide on container name.
     const name = `${this.containerName(slug, prevCommit)}-rb${Date.now().toString(36).slice(-4)}`;
-    const host = this.hostFor(slug);
+    const host = project.domain || this.hostFor(slug);
     const db: ProjectDb = { dbName: project.dbName, dbUser: project.dbUser, dbPassword: project.dbPassword };
     try {
       report('deploying', 'rolling back to the previous image');
@@ -224,6 +244,39 @@ export class DockerDeployEngine implements DeployEngine {
     // Caddy reloads its autosaved config on start (--resume) and immediately
     // re-attempts certificate issuance for every configured host.
     await this.docker.getContainer(CADDY_CONTAINER).restart({ t: 5 });
+  }
+
+  /**
+   * Re-point the project's public route to a new host WITHOUT rebuilding. The
+   * route id is keyed by slug, so upserting it with a new match host replaces
+   * the old one outright — the old address simply stops matching (no orphan
+   * route), and Caddy obtains a fresh Let's Encrypt cert for the new host. The
+   * container is untouched. With no running container there's nothing to point
+   * at, so we report live=false and the caller still persists the domain (it
+   * takes effect on the next deploy).
+   */
+  async changeDomain(project: ProjectMeta, newHost: string, opts: SmokeOpts = {}): Promise<DomainChangeResult> {
+    const { slug } = project;
+    try {
+      const running = await this.findProjectContainers(slug, true);
+      if (!running.length) return { ok: true, live: false };
+
+      await this.caddy.upsertRoute(slug, newHost, `${running[0]}:${SERVICE_PORT}`);
+
+      // Verify the public URL (DNS + freshly-issued TLS). A miss is a WARNING,
+      // not a failure: the route IS switched; issuance/propagation can lag.
+      const pub = await smokeCheck(`https://${newHost}/`, {
+        timeoutMs: opts.timeoutMs ?? 45_000,
+        intervalMs: opts.intervalMs ?? 5_000,
+      });
+      const publicWarning = pub.ok
+        ? undefined
+        : `The route now points at ${newHost}, but https://${newHost}/ isn't answering yet (${pub.error ?? 'no response'}). ` +
+          `The TLS certificate for the new host can take a minute or two to issue; if it persists, check the wildcard DNS record.`;
+      return { ok: true, live: true, publicWarning };
+    } catch (e) {
+      return { ok: false, live: false, error: (e as Error).message };
+    }
   }
 
   async containerLogs(slug: string, lines = 50): Promise<string> {
