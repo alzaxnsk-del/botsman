@@ -107,8 +107,14 @@ export const docTooBigMsg = (name: string, bytes: number): string =>
   `📄 ${name} is too large to read inline (max ${MAX_DOC_BYTES / 1024} KB; this is ${kb(bytes)} KB). Paste the key parts as a message, or trim the file and resend.`;
 export const docBinaryMsg = (name: string): string =>
   `📄 I can read text specs (.md, .txt, source files, JSON) — but ${name} looks binary, so I can't use it. Send a text file, or describe what you need in words.`;
-export const imageAcceptedMsg = (target: string): string =>
-  `🖼 Got your image — using it as a reference for ${target}.`;
+// With a caption, the user's TEXT is the actual instruction and the image is
+// only supporting context (e.g. a screenshot of the current page) — so don't
+// frame the image as the spec ("using it as a reference"), which misreads a
+// concrete edit request. With no caption the image really is the reference.
+export const imageAcceptedMsg = (target: string, hasCaption = false): string =>
+  hasCaption
+    ? `🖼 Got your image — applying your change to ${target} (using it as reference).`
+    : `🖼 Got your image — using it as the reference for ${target}.`;
 export const imageTooBigMsg = `🖼 That image is too large (max ${MAX_IMAGE_BYTES / (1024 * 1024)} MB). Resend a smaller one.`;
 export const downloadFailedMsg = "I couldn't download that file — please try resending it.";
 export const voiceUnsupportedMsg =
