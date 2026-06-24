@@ -1415,7 +1415,7 @@ export class TelegramGateway {
     const attachment: TaskAttachment = { name: fileRef, bytes };
     const connected = getFocus(this.store, ctx.chat!.id);
     if (connected) {
-      await ctx.reply(imageAcceptedMsg(connected));
+      await ctx.reply(imageAcceptedMsg(connected, !!caption?.trim()));
       return void this.runTask('edit', connected, buildImageInstruction({ caption, fileRef, mode: 'edit' }), ctx, attachment);
     }
     await this.routeAttachment(ctx, caption, buildImageInstruction({ caption, fileRef, mode: 'create' }), attachment);

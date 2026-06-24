@@ -8,7 +8,7 @@
  * make every self-update rebuild slow. Living in src/ means a bump only
  * re-runs the fast `COPY src` + tsc layers, keeping self-update snappy.
  */
-export const VERSION = '0.3.3';
+export const VERSION = '0.3.4';
 export const RELEASED = '2026-06-23';
 
 /** One-line version label for chat messages. */

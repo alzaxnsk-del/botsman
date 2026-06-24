@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isImage, extractDocText, buildDocInstruction, buildImageInstruction, imageFileName,
-  MAX_DOC_BYTES, docTooBigMsg, docBinaryMsg, docAcceptedMsg,
+  MAX_DOC_BYTES, docTooBigMsg, docBinaryMsg, docAcceptedMsg, imageAcceptedMsg,
 } from '../src/gateway/ingest.js';
 
 describe('isImage', () => {
@@ -95,5 +95,23 @@ describe('copy is English and informative', () => {
     expect(docTooBigMsg('big.md', 300 * 1024)).toContain('256');
     expect(docBinaryMsg('x.pdf')).toContain('x.pdf');
     expect(docAcceptedMsg('spec.md', 16 * 1024)).toContain('spec.md');
+  });
+});
+
+describe('imageAcceptedMsg', () => {
+  // With a caption, the user's text is the instruction — the ack must reflect
+  // "applying your change", NOT the misleading "using it as a reference" (which
+  // read as the wrong semantics for a concrete edit request).
+  it('reflects the user instruction when a caption is present', () => {
+    const msg = imageAcceptedMsg('botsman-landing', true);
+    expect(msg).toContain('botsman-landing');
+    expect(msg).toMatch(/applying your change/i);
+    expect(msg).not.toMatch(/using it as a reference for/i);
+  });
+
+  it('frames the image as the reference only when there is no caption', () => {
+    const msg = imageAcceptedMsg('botsman-landing', false);
+    expect(msg).toMatch(/reference/i);
+    expect(msg).toContain('botsman-landing');
   });
 });
