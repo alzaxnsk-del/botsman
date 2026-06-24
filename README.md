@@ -1,5 +1,8 @@
 # Botsman
 
+<img width="1536" height="1024" alt="image24061" src="https://github.com/user-attachments/assets/1956b972-2422-430e-9d09-e8f27b238c19" />
+
+
 **Describe a web service in a chat message. Botsman builds it, deploys it to your own server with a real domain and HTTPS, and sends you back a working link.**
 
 [![status: alpha](https://img.shields.io/badge/status-alpha-orange)](#early-stage)
