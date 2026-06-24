@@ -52,5 +52,5 @@ ${opts.mode === 'edit'
     ? 'MODE: EDIT. The project already exists and is deployed. Make the requested change with minimal diff; do not rewrite working parts; keep the same port/env/DB contract. Update CLAUDE.md per the PROJECT MEMORY section.'
     : 'MODE: CREATE. The directory contains a .gitignore and a starter CLAUDE.md (project name + the original request). Build the service from scratch per the request, and flesh out CLAUDE.md per the PROJECT MEMORY section.'}
 
-When finished, reply with a 1-3 sentence summary of what you did (it is forwarded to the end user in Telegram), in the language of the user's request.`;
+When finished, reply with a 1-3 sentence summary of WHAT YOU BUILT for the user — the features and what the service does — in the language of the user's request (it is forwarded to them in Telegram). Describe the product, not the plumbing: do NOT recite the deploy mechanics (PORT, Dockerfile, "GET / returns 200", env/DB wiring, "no hardcoded secrets") — those are reported to the user separately.`;
 }

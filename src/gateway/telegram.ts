@@ -23,8 +23,8 @@ import {
   type DevOpsOp, type DevOpsOpId, type DevOpsDeps, type Route,
 } from './devops.js';
 import { homeStatusLines, homeKeyboard, degradedNoneMessage } from './home.js';
-import { failureMessage, withElapsed } from './format.js';
-import { localDevInstructions } from '../clone.js';
+import { failureMessage, withElapsed, formatDeployCheck, detectLang, type DeployCheckFacts } from './format.js';
+import { localDevInstructions, cloneUrl } from '../clone.js';
 import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
 import { MEMORY_FILE, type Orchestrator, type TaskOutcome, type TaskAttachment } from '../orchestrator.js';
@@ -1455,6 +1455,9 @@ export class TelegramGateway {
     // an in-flight "✅ Done" edit racing the rich final message would win.
     let finished = false;
     let started = !wasQueued; // a task with nothing ahead is running immediately
+    // Build wall-clock: measured from when work actually STARTS (not enqueue), so
+    // the reported time reflects the build, not how long it waited in the queue.
+    let runStartedAt = Date.now();
     let earlyNudge: ReturnType<typeof setTimeout> | null = null;
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     const update = async (text: string) => {
@@ -1491,9 +1494,11 @@ export class TelegramGateway {
         instruction,
         (stage, detail) => {
           if (stage === 'accepted' && detail) slug = detail;
-          // First report = it actually started running → retire the Cancel button.
+          // First report = it actually started running → retire the Cancel button
+          // and start the build clock from here (queue wait doesn't count).
           if (!started) {
             started = true;
+            runStartedAt = Date.now();
             this.pendingTaskCancel.delete(statusMsg.message_id);
           }
           // 'done'/'failed' are not shown as stages: the rich outcome message
@@ -1511,7 +1516,7 @@ export class TelegramGateway {
       finished = true;
       stopTicks();
       this.pendingTaskCancel.delete(statusMsg.message_id);
-      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction, attachment });
+      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction, attachment }, Date.now() - runStartedAt);
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
       // A fresh build → connect to it, so the next message goes straight to the
       // new project and the persistent bar becomes its actions (the outcome
@@ -1546,6 +1551,7 @@ export class TelegramGateway {
   private async reportOutcome(
     ctx: Context, chatId: number, statusMsgId: number, o: TaskOutcome,
     retry?: { kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachment?: TaskAttachment },
+    elapsedMs?: number,
   ): Promise<void> {
     if (o.cancelled) {
       // Cancelled while queued — never ran, so no Retry/Doctor card, just a
@@ -1567,26 +1573,51 @@ export class TelegramGateway {
       }).catch(() => {});
       return;
     }
-    const lines = [`✅ *${o.slug}* — deployed`];
-    if (o.url) lines.push(o.url);
-    if (o.summary) lines.push('', o.summary.slice(0, 2000));
-    if (o.warning) lines.push('', `⚠️ ${o.warning}`);
-    if (o.costUsd && o.costUsd > 0) lines.push('', `💸 Tokens: ≈$${o.costUsd.toFixed(2)}`);
-    lines.push('', 'What should I change?');
+    const hasScreenshot = !!(o.screenshotPath && fs.existsSync(o.screenshotPath));
     // Public-URL warning comes with one-tap fixes (retry TLS / re-check).
     const fixKb = o.warning ? this.doctorKeyboard(o.slug, ['proxy', 'recheck']) : undefined;
-    await this.bot.api.editMessageText(chatId, statusMsgId, lines.join('\n'), {
+
+    let body: string;
+    if (retry?.kind === 'create' || retry?.kind === 'resume') {
+      // A freshly built project: a value-first "deploy check" (live URL, what it
+      // is, then the plumbing the user didn't have to do), localized to the
+      // spec's language. The clone command is filled in like /status + 💻 Code.
+      const hostHome = process.env.BOTSMAN_HOST_DIR ?? '~/.botsman';
+      const host = (await serverPublicIp()) ?? '<server>';
+      const facts: DeployCheckFacts = {
+        slug: o.slug,
+        url: o.url,
+        cloneCmd: o.slug ? cloneUrl({ slug: o.slug, hostHome, host }) : undefined,
+        summary: o.summary,
+        costUsd: o.costUsd,
+        elapsedMs,
+        publicWarning: o.warning,
+        hasScreenshot,
+      };
+      body = formatDeployCheck(facts, detectLang(o.summary || retry?.instruction));
+    } else {
+      // Edits/rollbacks keep the concise format — the full checklist would be
+      // noise on a one-line change to a project that's already live.
+      const lines = [`✅ *${o.slug}* — deployed`];
+      if (o.url) lines.push(o.url);
+      if (o.summary) lines.push('', o.summary.slice(0, 2000));
+      if (o.warning) lines.push('', `⚠️ ${o.warning}`);
+      if (o.costUsd && o.costUsd > 0) lines.push('', `💸 Tokens: ≈$${o.costUsd.toFixed(2)}`);
+      lines.push('', 'What should I change?');
+      body = lines.join('\n');
+    }
+    await this.bot.api.editMessageText(chatId, statusMsgId, body, {
       parse_mode: 'Markdown',
       link_preview_options: { is_disabled: true },
       reply_markup: fixKb,
     }).catch(async () => {
       // Markdown in agent summaries can be malformed — retry as plain text.
-      await this.bot.api.editMessageText(chatId, statusMsgId, lines.join('\n'), {
+      await this.bot.api.editMessageText(chatId, statusMsgId, body, {
         reply_markup: fixKb,
       }).catch(() => {});
     });
-    if (o.screenshotPath && fs.existsSync(o.screenshotPath)) {
-      await ctx.replyWithPhoto(new InputFile(o.screenshotPath)).catch((e) =>
+    if (hasScreenshot) {
+      await ctx.replyWithPhoto(new InputFile(o.screenshotPath!)).catch((e) =>
         logger.warn('screenshot send failed', { error: String(e) }),
       );
     }
