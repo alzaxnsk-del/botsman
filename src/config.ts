@@ -88,6 +88,52 @@ export function isValidDomain(s: string): boolean {
   return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s);
 }
 
+/**
+ * Merge fields to back up into the single /setup restore slot, FIRST-CAPTURE
+ * WINS: a field already present in the backup is never overwritten. This makes
+ * two things safe: (1) changing auth AND domain before the restart preserves
+ * both prior values (no single-slot clobber), and (2) re-tapping the SAME item
+ * can't overwrite the real backed-up value with the now-cleared `undefined`.
+ * A corrupt/empty existing backup is treated as no backup.
+ */
+export function mergeSetupBackup(
+  existing: string | null | undefined,
+  patch: Record<string, unknown>,
+): string {
+  let base: Record<string, unknown> = {};
+  if (existing) {
+    try { base = JSON.parse(existing) as Record<string, unknown>; } catch { /* start fresh */ }
+  }
+  const merged = { ...base };
+  for (const [k, v] of Object.entries(patch)) {
+    if (!(k in merged)) merged[k] = v; // don't clobber an earlier capture
+  }
+  return JSON.stringify(merged);
+}
+
+/**
+ * Turn a saved /setup backup blob into the patch to apply on /cancel (restore).
+ * Crucial fix: the coding-agent auth is a MUTUALLY-EXCLUSIVE pair
+ * (anthropicApiKey ⟂ claudeCodeOauthToken). When only one was set, the other is
+ * `undefined` and JSON.stringify DROPS it from the backup — so a naive restore
+ * would leave whatever method the user switched INTO during the reconfig still
+ * set, contradicting "kept your previous settings". Here we re-add the missing
+ * half of the auth pair as an explicit `undefined`, which updateConfigFile
+ * deletes — so restore fully returns to the pre-reconfig auth. Non-auth fields
+ * (baseDomain) are passed through unchanged. Returns null for a missing/corrupt
+ * blob (nothing to restore).
+ */
+export function restoreSetupBackupPatch(raw: string | null | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+  let patch: Record<string, unknown>;
+  try { patch = JSON.parse(raw) as Record<string, unknown>; } catch { return null; }
+  if ('anthropicApiKey' in patch || 'claudeCodeOauthToken' in patch) {
+    if (!('anthropicApiKey' in patch)) patch.anthropicApiKey = undefined;
+    if (!('claudeCodeOauthToken' in patch)) patch.claudeCodeOauthToken = undefined;
+  }
+  return patch;
+}
+
 /** Which onboarding pieces are still missing (asked for in the Telegram chat). */
 export function missingSetup(config: BotsmanConfig): Array<'auth' | 'domain'> {
   const missing: Array<'auth' | 'domain'> = [];

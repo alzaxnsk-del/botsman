@@ -9,7 +9,7 @@ import { detectIntent, looksLikeCreate, looksLikeDelete, looksLikeDomainChange, 
 import { isValidSlug } from '../slug.js';
 import { runDoctor, serverPublicIp, probeHostDns, type FixId, type HostDnsProbe } from '../doctor.js';
 import { resolveProjectDomain, baseOf } from '../domain.js';
-import { updateConfigFile } from '../config.js';
+import { updateConfigFile, mergeSetupBackup } from '../config.js';
 import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
 import {
   getFocus, setFocus, clearFocus, roomKeyboard, projectKeyboard, serverKeyboard, detectRoomSwitch,
@@ -373,14 +373,16 @@ export class TelegramGateway {
           : 'in about 10 seconds';
         if (what === 'auth') {
           const cfg = updateConfigFile({});
-          this.store.kvSet(SETUP_BACKUP_KEY, JSON.stringify({
+          // Merge (first-capture-wins) so tapping auth AND domain before the
+          // restart backs up BOTH — never a single-slot clobber that loses one.
+          this.store.kvSet(SETUP_BACKUP_KEY, mergeSetupBackup(this.store.kvGet(SETUP_BACKUP_KEY), {
             anthropicApiKey: cfg.anthropicApiKey, claudeCodeOauthToken: cfg.claudeCodeOauthToken,
           }));
           updateConfigFile({ anthropicApiKey: undefined, claudeCodeOauthToken: undefined });
           await ctx.reply(`Restarting to change the coding-agent auth — I'll ask you here ${when}. Once I'm back, send /cancel to keep your current one.`);
         } else if (what === 'domain') {
           const cfg = updateConfigFile({});
-          this.store.kvSet(SETUP_BACKUP_KEY, JSON.stringify({ baseDomain: cfg.baseDomain }));
+          this.store.kvSet(SETUP_BACKUP_KEY, mergeSetupBackup(this.store.kvGet(SETUP_BACKUP_KEY), { baseDomain: cfg.baseDomain }));
           updateConfigFile({ baseDomain: undefined });
           await ctx.reply(`Restarting to change the domain — I'll ask you here ${when}. Once I'm back, send /cancel to keep your current one. (Existing projects keep their addresses.)`);
         } else if (what === 'telemetry') {

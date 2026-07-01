@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validateConfig, missingSetup, saveConfig, loadConfig, updateConfigFile, ConfigError } from '../src/config.js';
+import { validateConfig, missingSetup, saveConfig, loadConfig, updateConfigFile, mergeSetupBackup, restoreSetupBackupPatch, ConfigError } from '../src/config.js';
 
 const valid = {
   telegramBotToken: '123456789:AAFakeTokenForTestsOnly_1234567890abc',
@@ -109,5 +109,82 @@ describe('validateConfig', () => {
 
   it('lowercases the domain', () => {
     expect(validateConfig({ ...valid, baseDomain: 'APPS.Example.COM' }).baseDomain).toBe('apps.example.com');
+  });
+});
+
+describe('mergeSetupBackup', () => {
+  it('starts a fresh backup from nothing', () => {
+    expect(JSON.parse(mergeSetupBackup(null, { baseDomain: 'apps.example.com' })))
+      .toEqual({ baseDomain: 'apps.example.com' });
+    expect(JSON.parse(mergeSetupBackup('', { anthropicApiKey: 'sk-ant-x' })))
+      .toEqual({ anthropicApiKey: 'sk-ant-x' });
+  });
+
+  it('accumulates a second field (tap auth then domain — both are preserved)', () => {
+    const afterAuth = mergeSetupBackup(null, { claudeCodeOauthToken: 'sk-ant-oat-x', anthropicApiKey: undefined });
+    const afterBoth = mergeSetupBackup(afterAuth, { baseDomain: 'apps.example.com' });
+    expect(JSON.parse(afterBoth)).toEqual({ claudeCodeOauthToken: 'sk-ant-oat-x', baseDomain: 'apps.example.com' });
+  });
+
+  it('first capture wins — re-tapping the same item cannot overwrite the real value with undefined', () => {
+    const first = mergeSetupBackup(null, { anthropicApiKey: 'sk-ant-real' });
+    // second tap sees auth already cleared in config → would pass undefined
+    const second = mergeSetupBackup(first, { anthropicApiKey: undefined, claudeCodeOauthToken: undefined });
+    expect(JSON.parse(second)).toEqual({ anthropicApiKey: 'sk-ant-real' });
+  });
+
+  it('treats a corrupt existing backup as empty rather than throwing', () => {
+    expect(JSON.parse(mergeSetupBackup('{not json', { baseDomain: 'x.com' }))).toEqual({ baseDomain: 'x.com' });
+  });
+});
+
+describe('restoreSetupBackupPatch', () => {
+  it('re-adds the missing half of the auth pair as an explicit undefined', () => {
+    const fromApi = restoreSetupBackupPatch(JSON.stringify({ anthropicApiKey: 'k' }))!;
+    expect(fromApi.anthropicApiKey).toBe('k');
+    expect('claudeCodeOauthToken' in fromApi).toBe(true); // present so updateConfigFile deletes it
+    expect(fromApi.claudeCodeOauthToken).toBeUndefined();
+
+    const fromOauth = restoreSetupBackupPatch(JSON.stringify({ claudeCodeOauthToken: 't' }))!;
+    expect(fromOauth.claudeCodeOauthToken).toBe('t');
+    expect('anthropicApiKey' in fromOauth).toBe(true);
+    expect(fromOauth.anthropicApiKey).toBeUndefined();
+  });
+
+  it('leaves a domain-only backup untouched (no auth keys injected)', () => {
+    const p = restoreSetupBackupPatch(JSON.stringify({ baseDomain: 'apps.example.com' }))!;
+    expect(p).toEqual({ baseDomain: 'apps.example.com' });
+    expect('anthropicApiKey' in p).toBe(false);
+    expect('claudeCodeOauthToken' in p).toBe(false);
+  });
+
+  it('returns null for a missing or corrupt blob', () => {
+    expect(restoreSetupBackupPatch(null)).toBeNull();
+    expect(restoreSetupBackupPatch('')).toBeNull();
+    expect(restoreSetupBackupPatch('{bad json')).toBeNull();
+  });
+
+  it('cancel restores previous auth even after the user switched method — never leaves BOTH set', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'botsman-cfg-'));
+    process.env.BOTSMAN_HOME = home;
+    try {
+      // Start: API key + domain (a server already in use).
+      updateConfigFile({ ...valid });
+      // /setup → auth backs up the CURRENT auth (API key; oauth is undefined → dropped by JSON).
+      const backup = mergeSetupBackup(null, {
+        anthropicApiKey: loadConfig().anthropicApiKey,
+        claudeCodeOauthToken: loadConfig().claudeCodeOauthToken,
+      });
+      updateConfigFile({ anthropicApiKey: undefined, claudeCodeOauthToken: undefined });
+      // User SWITCHES to a new subscription token…
+      updateConfigFile({ claudeCodeOauthToken: 'sk-ant-oat01-switched-in-token', anthropicApiKey: undefined });
+      // …then taps /cancel (reachable on the domain step of a combined reconfig).
+      updateConfigFile(restoreSetupBackupPatch(backup)!);
+      const restored = loadConfig();
+      expect(restored.anthropicApiKey).toBe(valid.anthropicApiKey); // previous key is back
+      expect(restored.claudeCodeOauthToken).toBeUndefined();        // switched-in token is gone (not both set)
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

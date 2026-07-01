@@ -1,7 +1,7 @@
 import { Bot, InlineKeyboard, type Context } from 'grammy';
 import dns from 'node:dns/promises';
 import { logger } from '../logger.js';
-import { updateConfigFile, missingSetup, isValidDomain } from '../config.js';
+import { updateConfigFile, missingSetup, isValidDomain, restoreSetupBackupPatch } from '../config.js';
 import { checkAnthropicKey, checkClaudeOauthToken } from '../preflight.js';
 import { isCloudflareIp, serverPublicIp } from '../doctor.js';
 import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
@@ -11,6 +11,24 @@ import { RESTART_NOTICE_KEY, SETUP_BACKUP_KEY, type BotsmanConfig } from '../typ
 export const READY_NOTIFY_KEY = 'notify_ready';
 
 type Expecting = 'oauth' | 'apikey' | 'domain' | null;
+
+/**
+ * Which onboarding step to show next. Pure so the wizard's control flow is
+ * unit-testable. A /setup RE-CONFIG (`reconfig`) only fixes the field(s) the
+ * owner chose to change — it never re-walks the telemetry step (nor, via the
+ * caller, the model step), so changing one thing doesn't feel like a fresh
+ * install. First-run (`reconfig: false`) walks the full wizard.
+ */
+export function nextOnboardingStep(opts: {
+  missing: ReadonlyArray<'auth' | 'domain'>;
+  reconfig: boolean;
+  telemetryAsked: boolean;
+}): 'auth' | 'domain' | 'telemetry' | 'finalize' {
+  if (opts.missing.includes('auth')) return 'auth';
+  if (opts.missing.includes('domain')) return 'domain';
+  if (!opts.reconfig && !opts.telemetryAsked) return 'telemetry';
+  return 'finalize';
+}
 
 /**
  * In-chat onboarding (and re-configuration): the console only establishes the
@@ -46,10 +64,19 @@ export class OnboardingBot {
     return updateConfigFile({});
   }
 
+  /** True while a /setup re-config is in flight: a backup of the previous
+   *  value(s) exists. Drives the "touch one field, don't reset the server"
+   *  behavior — targeted asks, no fresh-install greeting/step-numbers, and a
+   *  /cancel that restores. The backup is kept until finalize/cancel so this
+   *  stays true for the whole reconfig (not just the first saved step). */
+  private isReconfig(): boolean {
+    return !!this.store.kvGet(SETUP_BACKUP_KEY);
+  }
+
   /** A /setup re-config (a backup exists) touches ONE field — don't greet a
    *  returning owner as a brand-new install with "Step n of 4". */
   private heading(step: string, title: string): string {
-    return this.store.kvGet(SETUP_BACKUP_KEY) ? `*Update · ${title}*` : `*${step} · ${title}*`;
+    return this.isReconfig() ? `*Update · ${title}*` : `*${step} · ${title}*`;
   }
 
   private wire(): void {
@@ -63,11 +90,15 @@ export class OnboardingBot {
     });
 
     this.bot.command('start', async (ctx) => {
-      await ctx.reply(
-        "👋 Hi! I'm your Botsman — I build and deploy web services from plain descriptions.\n\n" +
-        'A couple of quick questions and we are ready to go.',
-      );
-      await this.advance(ctx);
+      // First run only gets the welcome; a /setup reconfig jumps straight to the
+      // one field being changed (no "a couple of questions" fresh-install feel).
+      if (!this.isReconfig()) {
+        await ctx.reply(
+          "👋 Hi! I'm your Botsman — I build and deploy web services from plain descriptions.\n\n" +
+          'A couple of quick questions and we are ready to go.',
+        );
+      }
+      await this.advance(ctx.chat!.id);
     });
 
     // Escape hatch from a /setup-triggered re-config: restore the previous
@@ -110,7 +141,7 @@ export class OnboardingBot {
               'Once the wildcard DNS record is live, re-verify any time with /setup → 🌐 Domain.',
               { parse_mode: 'Markdown' },
             );
-            await this.advance(ctx);
+            await this.advance(ctx.chat!.id);
           }
           break;
         case 'telemetry:yes':
@@ -120,7 +151,7 @@ export class OnboardingBot {
           const prev = this.config();
           updateConfigFile({ telemetry: { ...prev.telemetry, enabled } });
           await ctx.reply(enabled ? '✓ Telemetry enabled — thank you!' : '✓ Telemetry stays off.');
-          await this.finalize(ctx);
+          await this.finalize(ctx.chat!.id);
           break;
         }
         default:
@@ -131,7 +162,7 @@ export class OnboardingBot {
             const prev = this.config();
             updateConfigFile({ agent: { ...prev.agent, model: id } });
             await ctx.reply(`✓ ${modelLabel(id)} will write your code.`);
-            await this.advance(ctx);
+            await this.advance(ctx.chat!.id);
           }
           break;
       }
@@ -149,7 +180,7 @@ export class OnboardingBot {
           // silently. Nudge to tap instead of advancing past the choice.
           if (this.awaiting === 'model') return void ctx.reply('Tap one of the model buttons above to choose.');
           if (this.awaiting === 'telemetry') return void ctx.reply('Tap "Yes, allow" or "No, keep off" above.');
-          return this.advance(ctx);
+          return this.advance(ctx.chat!.id);
       }
     });
 
@@ -179,7 +210,11 @@ export class OnboardingBot {
       await ctx.reply('Nothing to cancel — this setup is required to start. Please finish it.');
       return;
     }
-    try { updateConfigFile(JSON.parse(raw) as Record<string, unknown>); } catch { /* keep going */ }
+    // restoreSetupBackupPatch re-adds the missing half of the auth pair as an
+    // explicit undefined, so a method the user switched into during the reconfig
+    // is actually cleared — otherwise "kept your previous settings" would lie.
+    const patch = restoreSetupBackupPatch(raw);
+    if (patch) { try { updateConfigFile(patch); } catch { /* keep going */ } }
     this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.store.kvSet(RESTART_NOTICE_KEY, '✓ Cancelled — kept your previous settings.');
     await ctx.reply('Cancelled — restoring your previous settings…');
@@ -187,16 +222,22 @@ export class OnboardingBot {
     setTimeout(() => process.exit(0), 1500);
   }
 
-  /** Ask for the first missing piece; finish when nothing is missing. */
-  private async advance(ctx: Context): Promise<void> {
-    const missing = missingSetup(this.config());
-    if (missing.includes('auth')) {
+  /** Ask for the next missing piece; finish when nothing is left. Sends to a
+   *  chat id (not a Context) so start() can proactively drive a reconfig without
+   *  a fresh incoming message. */
+  private async advance(chatId: number): Promise<void> {
+    const step = nextOnboardingStep({
+      missing: missingSetup(this.config()),
+      reconfig: this.isReconfig(),
+      telemetryAsked: this.telemetryAsked,
+    });
+    if (step === 'auth') {
       this.expecting = null;
       const kb = new InlineKeyboard()
         .text('🔑 Claude subscription', 'auth:oauth')
         .text('💳 Anthropic API key', 'auth:api');
       this.addCancel(kb);
-      await ctx.reply(
+      await this.bot.api.sendMessage(chatId,
         this.heading('Step 1 of 4', 'Coding agent') + '\n\n' +
         'How should I power code generation?\n\n' +
         '🔑 *Claude subscription* (Pro/Max) — no extra API bills; uses your plan limits, ' +
@@ -207,12 +248,12 @@ export class OnboardingBot {
       );
       return;
     }
-    if (missing.includes('domain')) {
+    if (step === 'domain') {
       this.expecting = 'domain';
       const ip = await serverPublicIp();
       const kb = new InlineKeyboard();
       const hasCancel = this.addCancel(kb);
-      await ctx.reply(
+      await this.bot.api.sendMessage(chatId,
         this.heading('Step 3 of 4', 'Domain') + '\n\n' +
         'Send me the base domain for your services, e.g. `example.com`.\n' +
         'Every project gets its own subdomain: `todo.example.com`.\n\n' +
@@ -225,12 +266,12 @@ export class OnboardingBot {
       );
       return;
     }
-    if (!this.telemetryAsked) {
+    if (step === 'telemetry') {
       this.telemetryAsked = true;
       this.expecting = null;
       this.awaiting = 'telemetry';
       const kb = new InlineKeyboard().text('Yes, allow', 'telemetry:yes').text('No, keep off', 'telemetry:no');
-      await ctx.reply(
+      await this.bot.api.sendMessage(chatId,
         this.heading('Step 4 of 4', 'Anonymous telemetry') + '\n\n' +
         'May I send three anonymous lifecycle pings — installed / first deploy / returned after a week? ' +
         'Never code, prompts or project content. Off by default.',
@@ -238,7 +279,7 @@ export class OnboardingBot {
       );
       return;
     }
-    await this.finalize(ctx);
+    await this.finalize(chatId);
   }
 
   private async handleOauthToken(ctx: Context, raw: string): Promise<void> {
@@ -255,9 +296,12 @@ export class OnboardingBot {
       return;
     }
     updateConfigFile({ claudeCodeOauthToken: token, anthropicApiKey: undefined });
-    this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.expecting = null;
     await this.edit(ctx, probeMsg.message_id, `✓ Token works — usage counts against your subscription limits.${this.deletedNote(deleted)}`);
+    // Reconfig: the owner only wanted to change auth — don't drag them back
+    // through the model step; the existing model is kept. Backup stays until
+    // finalize so /cancel still works. First run walks on to the model step.
+    if (this.isReconfig()) return void this.advance(ctx.chat!.id);
     await this.askModel(ctx);
   }
 
@@ -271,9 +315,10 @@ export class OnboardingBot {
       return;
     }
     updateConfigFile({ anthropicApiKey: key, claudeCodeOauthToken: undefined });
-    this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.expecting = null;
     await this.edit(ctx, probeMsg.message_id, `✓ Key works.${this.deletedNote(deleted)}`);
+    // Reconfig: only auth was being changed — skip the model step (kept as-is).
+    if (this.isReconfig()) return void this.advance(ctx.chat!.id);
     await this.askModel(ctx);
   }
 
@@ -334,17 +379,26 @@ export class OnboardingBot {
       return;
     }
     updateConfigFile({ baseDomain: domain });
-    this.store.kvSet(SETUP_BACKUP_KEY, '');
     this.pendingDomain = null;
     this.expecting = null;
     await ctx.reply(`✓ \`*.${domain}\` points at this server.`, { parse_mode: 'Markdown' });
-    await this.advance(ctx);
+    await this.advance(ctx.chat!.id);
   }
 
-  private async finalize(ctx: Context): Promise<void> {
-    this.store.kvSet(READY_NOTIFY_KEY, '1');
-    await ctx.reply('✓ All set! Restarting with your settings — give me ~10 seconds…');
-    logger.info('onboarding complete, restarting daemon');
+  private async finalize(chatId: number): Promise<void> {
+    // A /setup reconfig must NOT look like a first run: no "describe your first
+    // service" prompt (READY_NOTIFY), just a quiet "settings updated" notice.
+    // Read reconfig BEFORE clearing the backup that signals it.
+    const reconfig = this.isReconfig();
+    if (reconfig) {
+      this.store.kvSet(SETUP_BACKUP_KEY, ''); // reconfig done → drop the restore point
+      this.store.kvSet(RESTART_NOTICE_KEY, '✓ Back online — settings updated. Your projects and other settings are untouched.');
+      await this.bot.api.sendMessage(chatId, '✓ Updated — restarting to apply (~10s)… Nothing else changes.').catch(() => {});
+    } else {
+      this.store.kvSet(READY_NOTIFY_KEY, '1');
+      await this.bot.api.sendMessage(chatId, '✓ All set! Restarting with your settings — give me ~10 seconds…').catch(() => {});
+    }
+    logger.info('onboarding complete, restarting daemon', { reconfig });
     setTimeout(() => process.exit(0), 1500); // restart policy brings us back in full mode
   }
 
@@ -373,12 +427,19 @@ export class OnboardingBot {
     void this.bot.start({
       onStart: (me) => logger.info('onboarding bot started', { username: me.username }),
     });
-    // Nudge the owner proactively — they may not know they should /start.
+    const reconfig = this.isReconfig();
     for (const id of this.ownerIds) {
-      await this.bot.api.sendMessage(
-        id,
-        "👋 Botsman is installed! A couple of questions and we're ready — send /start or just reply here.",
-      ).catch(() => { /* user hasn't opened the chat yet — /start will do */ });
+      if (reconfig) {
+        // A /setup reconfig: no fresh-install greeting — go straight to the one
+        // field being changed. (Everything else is untouched and stays live.)
+        await this.advance(id).catch(() => { /* user hasn't opened the chat yet */ });
+      } else {
+        // First run — nudge the owner; they may not know they should /start.
+        await this.bot.api.sendMessage(
+          id,
+          "👋 Botsman is installed! A couple of questions and we're ready — send /start or just reply here.",
+        ).catch(() => { /* user hasn't opened the chat yet — /start will do */ });
+      }
     }
   }
 }
