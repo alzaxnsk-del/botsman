@@ -6,7 +6,8 @@ import type { Orchestrator } from '../orchestrator.js';
 import type { HostExec } from '../hostExec.js';
 import { runDoctor } from '../doctor.js';
 import { RESTART_NOTICE_KEY } from '../types.js';
-import { versionLine } from '../version.js';
+import { versionLine, VERSION } from '../version.js';
+import { fetchLatestVersion, isNewer } from '../update.js';
 
 /**
  * DevOps room: free text → a FIXED catalog of operations. The LLM only picks an
@@ -109,6 +110,9 @@ export interface DevOpsDeps {
   orchestrator: Orchestrator;
   hostExec: HostExec;
   hostRepoDir: string;
+  /** Upstream version.ts URL for the cheap "already current?" pre-check before a
+   *  manual self-update (skips git/build when nothing new). Optional. */
+  updateUrl?: string;
 }
 
 /**
@@ -332,6 +336,16 @@ export async function runMutatingOp(op: DevOpsOp, deps: DevOpsDeps): Promise<str
       return r.ok ? `✓ ${r.output}` : `✗ Prune failed: ${r.output}`;
     }
     case 'self_update': {
+      // Cheap pre-check: compare the upstream VERSION to ours BEFORE touching the
+      // host. Match → nothing to install, zero git/fetch/build (the "it 'updates'
+      // with no new version" complaint). A failed/absent check falls through to
+      // the real update, which still has its own image-identity no-op backstop.
+      if (deps.updateUrl) {
+        const latest = await fetchLatestVersion({ url: deps.updateUrl }).catch(() => null);
+        if (latest && !isNewer(latest, VERSION)) {
+          return `✓ Already up to date — running ${versionLine()}. Nothing new to install.`;
+        }
+      }
       // Persist the back-online notice BEFORE the update, so a fast container
       // recreate can't race the SQLite write; clear it if the build never lands.
       deps.store.kvSet(RESTART_NOTICE_KEY, '✓ Botsman updated and back online.');

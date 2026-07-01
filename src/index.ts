@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import Dockerode from 'dockerode';
 import { logger } from './logger.js';
 import { paths } from './paths.js';
-import { configExists, loadConfig, missingSetup, ConfigError } from './config.js';
+import { configExists, loadConfig, missingSetup, updateCheckEnabled, ConfigError } from './config.js';
 import { OnboardingBot, READY_NOTIFY_KEY } from './gateway/onboarding.js';
 import { RESTART_NOTICE_KEY, PREFLIGHT_WARNINGS_KEY } from './types.js';
 import { Store } from './db.js';
@@ -22,8 +22,9 @@ import { preflight } from './preflight.js';
 import { runSetupWizard } from './setup.js';
 import { suggestSlugLLM, suggestSlugCLI } from './naming.js';
 import { makeStructuredLlm, makeLlmHealth } from './llm.js';
-import { versionLine } from './version.js';
+import { versionLine, VERSION } from './version.js';
 import { HostExec } from './hostExec.js';
+import { UpdateChecker, resolveVersionUrl, isQuietMoment, UPDATE_IDLE_MS } from './update.js';
 
 async function main(): Promise<void> {
   const cmd = process.argv[2] ?? 'start';
@@ -177,6 +178,24 @@ async function main(): Promise<void> {
 
   startControlServer(orchestrator, controlToken, (slug, _ok, message) => void gateway.notifyOwner(message));
   await gateway.start();
+
+  // Daily update-check: a cheap version probe that offers to update at a quiet
+  // moment (no task running, chat idle ≥ 60 min) — never mid-conversation. On by
+  // default; toggled live in /setup (read fresh from config each tick).
+  const updateChecker = new UpdateChecker({
+    store,
+    currentVersion: VERSION,
+    versionUrl: resolveVersionUrl(),
+    isEnabled: () => { try { return updateCheckEnabled(loadConfig()); } catch { return false; } },
+    isQuiet: () => isQuietMoment({
+      lastActivityIso: store.kvGet('last_activity'),
+      queueLength: orchestrator.queueLength,
+      now: Date.now(),
+      idleMs: UPDATE_IDLE_MS,
+    }),
+    offer: (latest) => gateway.offerUpdate(latest),
+  });
+  updateChecker.start();
 
   if (pre.warnings.length) {
     await gateway.notifyOwner('⚠️ Botsman started with warnings:\n- ' + pre.warnings.join('\n- '));

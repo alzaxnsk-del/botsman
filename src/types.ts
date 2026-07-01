@@ -111,6 +111,11 @@ export interface BotsmanConfig {
     model?: string;
     language?: string;
   };
+  /** Daily "is there a newer Botsman?" check that pings the owner to update at a
+   *  quiet moment. On by default; the owner can turn it off in /setup. */
+  updateCheck?: {
+    enabled?: boolean;
+  };
   /** Docker / proxy endpoints; defaults fit the docker-compose layout. */
   docker?: {
     socketPath?: string;

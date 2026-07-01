@@ -74,6 +74,7 @@ export function validateConfig(raw: unknown): BotsmanConfig {
     // updateConfigFile() merge — e.g. /setup saving the Whisper key — doesn't
     // silently drop it on the next rewrite.
     transcription: c.transcription as BotsmanConfig['transcription'],
+    updateCheck: c.updateCheck as BotsmanConfig['updateCheck'],
     docker: (c.docker as BotsmanConfig['docker']) ?? {},
     // Default: unix socket shared with the caddy container via a volume —
     // unreachable from deployed services (§5). http:// URLs work for dev.
@@ -86,6 +87,11 @@ export function validateConfig(raw: unknown): BotsmanConfig {
 
 export function isValidDomain(s: string): boolean {
   return /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s);
+}
+
+/** Auto update-check is ON unless the owner explicitly turned it off in /setup. */
+export function updateCheckEnabled(config: BotsmanConfig): boolean {
+  return config.updateCheck?.enabled !== false;
 }
 
 /**

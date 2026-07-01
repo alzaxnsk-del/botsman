@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { validateConfig, missingSetup, saveConfig, loadConfig, updateConfigFile, mergeSetupBackup, restoreSetupBackupPatch, ConfigError } from '../src/config.js';
+import { validateConfig, missingSetup, saveConfig, loadConfig, updateConfigFile, mergeSetupBackup, restoreSetupBackupPatch, updateCheckEnabled, ConfigError } from '../src/config.js';
 
 const valid = {
   telegramBotToken: '123456789:AAFakeTokenForTestsOnly_1234567890abc',
@@ -183,6 +183,37 @@ describe('restoreSetupBackupPatch', () => {
       const restored = loadConfig();
       expect(restored.anthropicApiKey).toBe(valid.anthropicApiKey); // previous key is back
       expect(restored.claudeCodeOauthToken).toBeUndefined();        // switched-in token is gone (not both set)
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('updateCheck (auto update-check config)', () => {
+  afterEach(() => { delete process.env.BOTSMAN_HOME; });
+
+  it('defaults ON, and OFF only when explicitly disabled', () => {
+    expect(updateCheckEnabled(validateConfig(valid))).toBe(true);              // absent → ON
+    expect(updateCheckEnabled(validateConfig({ ...valid, updateCheck: {} }))).toBe(true); // {} → ON
+    expect(updateCheckEnabled(validateConfig({ ...valid, updateCheck: { enabled: false } }))).toBe(false);
+    expect(updateCheckEnabled(validateConfig({ ...valid, updateCheck: { enabled: true } }))).toBe(true);
+  });
+
+  it('validateConfig keeps updateCheck in its rebuilt object (not dropped)', () => {
+    expect(validateConfig({ ...valid, updateCheck: { enabled: false } }).updateCheck).toEqual({ enabled: false });
+  });
+
+  it('the OFF toggle survives an unrelated later updateConfigFile write', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'botsman-cfg-'));
+    process.env.BOTSMAN_HOME = home;
+    try {
+      // /setup → 🔔 turns alerts OFF…
+      updateConfigFile({ ...valid, updateCheck: { enabled: false } });
+      expect(updateCheckEnabled(loadConfig())).toBe(false);
+      // …an UNRELATED change (e.g. model) must not silently re-enable it.
+      updateConfigFile({ agent: { model: 'opus' } });
+      expect(loadConfig().updateCheck).toEqual({ enabled: false });
+      expect(updateCheckEnabled(loadConfig())).toBe(false);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

@@ -9,7 +9,8 @@ import { detectIntent, looksLikeCreate, looksLikeDelete, looksLikeDomainChange, 
 import { isValidSlug } from '../slug.js';
 import { runDoctor, serverPublicIp, probeHostDns, type FixId, type HostDnsProbe } from '../doctor.js';
 import { resolveProjectDomain, baseOf } from '../domain.js';
-import { updateConfigFile, mergeSetupBackup } from '../config.js';
+import { updateConfigFile, mergeSetupBackup, updateCheckEnabled } from '../config.js';
+import { resolveVersionUrl } from '../update.js';
 import { MODEL_CHOICES, isModelId, modelLabel } from '../agent/models.js';
 import {
   getFocus, setFocus, clearFocus, roomKeyboard, projectKeyboard, serverKeyboard, detectRoomSwitch,
@@ -38,7 +39,7 @@ import {
   resolveTranscriptionSettings, transcribeAudio, audioFileName, MAX_AUDIO_BYTES,
   voiceTranscribingMsg, voiceHeardMsg, voiceEmptyMsg, voiceFailedMsg, voiceTooBigMsg, voiceNotConfiguredMsg,
 } from './transcribe.js';
-import { versionLine } from '../version.js';
+import { versionLine, VERSION } from '../version.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
 import type { DeployEngine, DomainChangeResult } from '../deploy/engine.js';
@@ -169,6 +170,7 @@ export class TelegramGateway {
       orchestrator: this.orchestrator,
       hostExec: this.hostExec,
       hostRepoDir: this.hostRepoDir,
+      updateUrl: resolveVersionUrl(),
     };
   }
 
@@ -360,6 +362,40 @@ export class TelegramGateway {
         try { updateConfigFile({ transcription: undefined }); } catch { /* ignore */ }
         await ctx.reply('🔕 Voice transcription turned off. Re-enable any time with /setup → 🎤 Voice.');
         logger.info('voice transcription disabled');
+        return;
+      }
+
+      // Toggle the daily update-check alert. No restart — the checker reads the
+      // flag live each tick, so it takes effect immediately.
+      if (data === 'setup:autoupdate') {
+        await ctx.answerCallbackQuery();
+        const cfg = updateConfigFile({});
+        const enabled = !updateCheckEnabled(cfg);
+        updateConfigFile({ updateCheck: { ...cfg.updateCheck, enabled } });
+        await ctx.reply(
+          enabled
+            ? "🔔 Update alerts ON — I'll check daily and only ping you when things are quiet (no task running, chat idle)."
+            : '🔕 Update alerts OFF — I won\'t check for new versions. You can still update anytime via 🛠 Server → ⬆️ Update.',
+        );
+        logger.info('update-check toggled', { enabled });
+        return;
+      }
+
+      // Auto-update offer buttons: "Update now" drops into the standard host-level
+      // self-update confirm; "Later" just dismisses (the checker's snooze window
+      // was already set when the offer was sent, so it won't re-ask for ~24h).
+      if (data === 'update:now') {
+        await ctx.answerCallbackQuery();
+        const op = opLiteral('self_update');
+        const kb = new InlineKeyboard().text('✅ Execute', 'devops:exec').text('✖️ Cancel', 'devops:cancel');
+        const sent = await ctx.reply(`${op.humanSummary}?`, { reply_markup: kb });
+        this.pendingDevOps.set(chatId, { messageId: sent.message_id, op, confirmed: false });
+        return;
+      }
+      if (data === 'update:later') {
+        await ctx.answerCallbackQuery({ text: 'OK — later' });
+        const mid = ctx.callbackQuery.message?.message_id;
+        if (mid) await this.bot.api.editMessageText(chatId, mid, "🕒 OK — I'll remind you at a good moment.").catch(() => {});
         return;
       }
 
@@ -860,6 +896,7 @@ export class TelegramGateway {
   /** The /setup menu (also reached from the Home panel's 🔧 Setup button). */
   private async sendSetupMenu(ctx: Context): Promise<void> {
     const voiceOn = !!this.transcriptionSettings();
+    const updatesOn = this.updateCheckOn();
     const kb = new InlineKeyboard()
       .text('🔑 Coding agent auth', 'setup:auth')
       .text('🌐 Domain', 'setup:domain')
@@ -867,12 +904,22 @@ export class TelegramGateway {
       .text('🧠 Model', 'setup:model')
       .text('📊 Toggle telemetry', 'setup:telemetry')
       .row()
-      .text(voiceOn ? '🎤 Voice (on)' : '🎤 Voice (off)', 'setup:voice');
+      .text(voiceOn ? '🎤 Voice (on)' : '🎤 Voice (off)', 'setup:voice')
+      .text(updatesOn ? '🔔 Update alerts (on)' : '🔔 Update alerts (off)', 'setup:autoupdate');
     await ctx.reply(
       `What do you want to change? Current model: ${modelLabel(this.currentModel())}. ` +
-        `Voice transcription is ${voiceOn ? 'on' : 'off'}.`,
+        `Voice transcription is ${voiceOn ? 'on' : 'off'}; update alerts are ${updatesOn ? 'on' : 'off'}.`,
       { reply_markup: kb },
     );
+  }
+
+  /** Auto update-check state, read live from config (default ON). */
+  private updateCheckOn(): boolean {
+    try {
+      return updateCheckEnabled(updateConfigFile({}));
+    } catch {
+      return true;
+    }
   }
 
   private async showProjectPicker(ctx: Context): Promise<void> {
@@ -1899,6 +1946,18 @@ export class TelegramGateway {
       // "back online" notice must not clobber a connected user's project keyboard.
       const opts = withKeyboard ? { reply_markup: this.replyKeyboardFor(id) } : {};
       await this.bot.api.sendMessage(id, text, opts).catch(() => {});
+    }
+  }
+
+  /** Offer a newer version to the owner with one-tap Update / Later buttons.
+   *  Called by the UpdateChecker only at a quiet moment (no task, chat idle). */
+  async offerUpdate(latest: string): Promise<void> {
+    const kb = new InlineKeyboard().text('⬆️ Update now', 'update:now').text('🕒 Later', 'update:later');
+    const text =
+      `🆕 A newer Botsman is available: *v${latest}* (you're on v${VERSION}).\n` +
+      "Update now? It rebuilds and restarts — I'm back in ~30–60s, and your projects and settings are untouched.";
+    for (const id of this.ownerIds) {
+      await this.bot.api.sendMessage(id, text, { parse_mode: 'Markdown', reply_markup: kb }).catch(() => {});
     }
   }
 
