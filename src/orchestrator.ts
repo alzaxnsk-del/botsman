@@ -52,7 +52,9 @@ interface QueueItem {
   instruction: string;
   report: StageReporter;
   resolve: (o: TaskOutcome) => void;
-  attachment?: TaskAttachment;
+  /** Reference files to drop into the repo before the agent runs (e.g. an album
+   *  of screenshots). Empty/undefined for text-only tasks. */
+  attachments?: TaskAttachment[];
 }
 
 /**
@@ -94,11 +96,11 @@ export class Orchestrator {
     report: StageReporter,
     slug?: string,
     onEnqueued?: (cancel: () => boolean) => void,
-    attachment?: TaskAttachment,
+    attachments?: TaskAttachment[],
   ): Promise<TaskOutcome> {
     return new Promise((resolve) => {
       const id = ++this.seq;
-      this.queue.push({ id, kind, slug, instruction, report, resolve, attachment });
+      this.queue.push({ id, kind, slug, instruction, report, resolve, attachments });
       onEnqueued?.(() => this.cancelQueued(id, slug));
       void this.drain();
     });
@@ -136,30 +138,32 @@ export class Orchestrator {
 
   private async execute(item: QueueItem): Promise<TaskOutcome> {
     switch (item.kind) {
-      case 'create': return this.createProject(item.instruction, item.report, item.attachment);
+      case 'create': return this.createProject(item.instruction, item.report, item.attachments);
       case 'resume': return this.resumeCreate(item.slug!, item.report);
-      case 'edit': return this.editProject(item.slug!, item.instruction, item.report, item.attachment);
+      case 'edit': return this.editProject(item.slug!, item.instruction, item.report, item.attachments);
       case 'rollback': return this.rollbackProject(item.slug!, item.report);
       case 'delete': return this.deleteProject(item.slug!);
       case 'redeploy': return this.redeployFromPush(item.slug!, item.report);
     }
   }
 
-  /** Write an attached reference file into the project dir (host side) so it
-   *  appears at /work/<name> inside the agent container via the existing mount.
-   *  Best-effort: a write failure shouldn't abort the build. */
-  private writeAttachment(slug: string, attachment?: TaskAttachment): void {
-    if (!attachment) return;
-    try {
-      fs.writeFileSync(path.join(paths.projectDir(slug), attachment.name), attachment.bytes);
-    } catch (e) {
-      logger.warn('failed to write attachment', { slug, error: (e as Error).message });
+  /** Write attached reference files into the project dir (host side) so they
+   *  appear at /work/<name> inside the agent container via the existing mount.
+   *  Best-effort per file: one write failure shouldn't abort the build or drop
+   *  the others. */
+  private writeAttachments(slug: string, attachments?: TaskAttachment[]): void {
+    for (const a of attachments ?? []) {
+      try {
+        fs.writeFileSync(path.join(paths.projectDir(slug), a.name), a.bytes);
+      } catch (e) {
+        logger.warn('failed to write attachment', { slug, name: a.name, error: (e as Error).message });
+      }
     }
   }
 
   // --- create (§1 happy path) ---
 
-  private async createProject(description: string, report: StageReporter, attachment?: TaskAttachment): Promise<TaskOutcome> {
+  private async createProject(description: string, report: StageReporter, attachments?: TaskAttachment[]): Promise<TaskOutcome> {
     const suggested = this.suggestName ? await this.suggestName(description).catch(() => null) : null;
     const base = suggested ?? slugFromDescription(description);
     const slug = uniqueSlug(base, (s) => this.store.projectExists(s));
@@ -175,7 +179,7 @@ export class Orchestrator {
       currentCommit: null, currentImage: null, prevCommit: null, prevImage: null,
       dbName, dbUser, dbPassword: generatePassword(),
     });
-    return this.buildNewProject(project, description, report, attachment);
+    return this.buildNewProject(project, description, report, attachments);
   }
 
   /**
@@ -196,7 +200,7 @@ export class Orchestrator {
     project: ProjectMeta,
     description: string,
     report: StageReporter,
-    attachment?: TaskAttachment,
+    attachments?: TaskAttachment[],
   ): Promise<TaskOutcome> {
     const slug = project.slug;
     const task = this.store.createTask(slug, 'create', description);
@@ -206,9 +210,9 @@ export class Orchestrator {
     try {
       await initProjectRepo(slug);
       seedProjectMemory(slug, description);
-      // Drop any attached reference image into the repo BEFORE the agent runs, so
-      // it's visible at /work/<name> and gets committed with the project.
-      this.writeAttachment(slug, attachment);
+      // Drop any attached reference images into the repo BEFORE the agent runs,
+      // so they're visible at /work/<name> and get committed with the project.
+      this.writeAttachments(slug, attachments);
       await this.pgAdmin.ensureProjectDb(project);
 
       report('generating');
@@ -231,7 +235,7 @@ export class Orchestrator {
       // — it produced no application files at all. commitAll still returns a
       // commit (the seeds are new), so the "no files" check above can't catch
       // this. Fail with a clear message instead of deploying an empty project.
-      if (!agentProducedAppFiles(slug, attachment?.name)) {
+      if (!agentProducedAppFiles(slug, attachments?.map((a) => a.name))) {
         const err =
           'The agent finished without creating any application files. ' +
           'Try rephrasing the request with a bit more detail about what to build.';
@@ -263,7 +267,7 @@ export class Orchestrator {
 
   // --- edit (§1 iteration) ---
 
-  private async editProject(slug: string, instruction: string, report: StageReporter, attachment?: TaskAttachment): Promise<TaskOutcome> {
+  private async editProject(slug: string, instruction: string, report: StageReporter, attachments?: TaskAttachment[]): Promise<TaskOutcome> {
     const project = this.store.getProject(slug);
     if (!project) return { ok: false, slug, error: `Project ${slug} not found.` };
     const task = this.store.createTask(slug, 'edit', instruction);
@@ -282,8 +286,8 @@ export class Orchestrator {
 
     const commitBefore = await headCommit(slug);
     try {
-      // Make any attached reference image visible to the agent before it runs.
-      this.writeAttachment(slug, attachment);
+      // Make any attached reference images visible to the agent before it runs.
+      this.writeAttachments(slug, attachments);
       report('generating');
       const gen = await this.runAgentWithSecretGuard(slug, instruction, 'edit', report);
       if (!gen.ok) {
@@ -590,9 +594,9 @@ const MEMORY_MAX_BYTES = 16 * 1024;
  * an empty project. The narrower "no package.json/Dockerfile" case is caught
  * later by the deploy engine with its own clear message.
  */
-function agentProducedAppFiles(slug: string, extraSeed?: string): boolean {
+function agentProducedAppFiles(slug: string, extraSeeds?: string[]): boolean {
   const seeds = new Set(['.git', '.gitignore', MEMORY_FILE]);
-  if (extraSeed) seeds.add(extraSeed); // a reference image we dropped in isn't an app file
+  for (const s of extraSeeds ?? []) seeds.add(s); // reference images we dropped in aren't app files
   try {
     return fs.readdirSync(paths.projectDir(slug)).some((name) => !seeds.has(name));
   } catch {

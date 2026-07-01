@@ -285,12 +285,38 @@ describe('Orchestrator pipeline', () => {
     const orch = makeOrch(agent, fakeEngine());
     const o = await orch.enqueue(
       'create', 'Build the UI in the attached image.', () => {}, undefined, undefined,
-      { name: 'reference.png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+      [{ name: 'reference.png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]) }],
     );
     expect(o.ok).toBe(true);
     expect(sawImage).toBe(true);
     // ...and it's persisted with the project (committed alongside the code).
     expect(fs.existsSync(path.join(paths.projectDir(o.slug), 'reference.png'))).toBe(true);
+  });
+
+  it('writes ALL images of an album into the project dir (multi-attachment)', async () => {
+    const seen: string[] = [];
+    const agent: CodingAgent = {
+      run: async (input) => {
+        for (const f of fs.readdirSync(input.projectDir)) {
+          if (/^reference\d*\.png$/.test(f)) seen.push(f);
+        }
+        fs.writeFileSync(path.join(input.projectDir, 'package.json'), '{"name":"x"}');
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), 'const p = process.env.PORT;');
+        return { ok: true, summary: 'built from mockups', durationMs: 1 };
+      },
+    };
+    const orch = makeOrch(agent, fakeEngine());
+    const o = await orch.enqueue(
+      'create', 'Build the UI shown in the attached images.', () => {}, undefined, undefined,
+      [
+        { name: 'reference1.png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+        { name: 'reference2.png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x48]) },
+      ],
+    );
+    expect(o.ok).toBe(true);
+    expect(seen.sort()).toEqual(['reference1.png', 'reference2.png']);
+    expect(fs.existsSync(path.join(paths.projectDir(o.slug), 'reference1.png'))).toBe(true);
+    expect(fs.existsSync(path.join(paths.projectDir(o.slug), 'reference2.png'))).toBe(true);
   });
 
   it('cancels a still-queued task; a running task cannot be cancelled', async () => {

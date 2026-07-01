@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isImage, extractDocText, buildDocInstruction, buildImageInstruction, imageFileName,
-  MAX_DOC_BYTES, docTooBigMsg, docBinaryMsg, docAcceptedMsg, imageAcceptedMsg,
+  MAX_DOC_BYTES, docTooBigMsg, docBinaryMsg, docAcceptedMsg, imageAcceptedMsg, someImagesTooBigMsg,
 } from '../src/gateway/ingest.js';
 
 describe('isImage', () => {
@@ -69,15 +69,35 @@ describe('buildDocInstruction', () => {
 
 describe('buildImageInstruction', () => {
   it('references the file path and tells the agent to Read it', () => {
-    const out = buildImageInstruction({ caption: 'make it like this', fileRef: 'reference.png', mode: 'edit' });
+    const out = buildImageInstruction({ caption: 'make it like this', fileRefs: ['reference.png'], mode: 'edit' });
     expect(out.startsWith('make it like this')).toBe(true);
     expect(out).toContain('./reference.png');
     expect(out).toContain('Read');
   });
 
-  it('uses a create-vs-edit default lead with no caption', () => {
-    expect(buildImageInstruction({ fileRef: 'reference.png', mode: 'create' })).toMatch(/[Bb]uild/);
-    expect(buildImageInstruction({ fileRef: 'reference.png', mode: 'edit' })).toMatch(/change/i);
+  it('uses a create-vs-edit default lead with no caption (singular for one image)', () => {
+    const create = buildImageInstruction({ fileRefs: ['reference.png'], mode: 'create' });
+    const edit = buildImageInstruction({ fileRefs: ['reference.png'], mode: 'edit' });
+    expect(create).toMatch(/[Bb]uild/);
+    expect(edit).toMatch(/change/i);
+    // Pin the SINGULAR lead so a plural-wording regression is caught.
+    expect(create).toMatch(/shown in the attached image\b/);
+    expect(create).not.toMatch(/attached images/);
+  });
+
+  it('lists every reference of an album and pluralises BOTH the lead and the body', () => {
+    const out = buildImageInstruction({ fileRefs: ['reference1.png', 'reference2.jpg', 'reference3.png'], mode: 'create' });
+    expect(out).toContain('./reference1.png');
+    expect(out).toContain('./reference2.jpg');
+    expect(out).toContain('./reference3.png');
+    expect(out).toMatch(/3 reference images/);          // body pluralised + counted
+    expect(out).toMatch(/shown in the attached images/); // LEAD pluralised (the actual branch)
+    expect(out).not.toMatch(/the attached image\b/);     // never the singular lead
+  });
+
+  it('survives an empty list with a sane single-image fallback', () => {
+    const out = buildImageInstruction({ fileRefs: [], mode: 'create' });
+    expect(out).toContain('./reference.png');
   });
 });
 
@@ -87,6 +107,12 @@ describe('imageFileName', () => {
     expect(imageFileName(undefined, 'image/png')).toBe('reference.png');
     expect(imageFileName('mock.WEBP')).toBe('reference.webp');
     expect(imageFileName()).toBe('reference.png'); // sane default
+  });
+
+  it('suffixes album members with their 1-based index so names never collide', () => {
+    expect(imageFileName('photo.jpg', 'image/jpeg', 1)).toBe('reference1.jpg');
+    expect(imageFileName(undefined, 'image/png', 2)).toBe('reference2.png');
+    expect(imageFileName('a.png', 'image/png', 0)).toBe('reference.png'); // 0 ⇒ no suffix (single)
   });
 });
 
@@ -113,5 +139,19 @@ describe('imageAcceptedMsg', () => {
     const msg = imageAcceptedMsg('botsman-landing', false);
     expect(msg).toMatch(/reference/i);
     expect(msg).toContain('botsman-landing');
+  });
+
+  it('pluralises and counts when an album of several images arrives', () => {
+    const msg = imageAcceptedMsg('botsman-landing', false, 3);
+    expect(msg).toContain('3 images');
+    expect(msg).toMatch(/them/);
+    expect(msg).toContain('botsman-landing');
+  });
+});
+
+describe('someImagesTooBigMsg', () => {
+  it('reports how many oversized images were skipped, with correct plural', () => {
+    expect(someImagesTooBigMsg(1)).toMatch(/Skipped 1 image\b/);
+    expect(someImagesTooBigMsg(2)).toMatch(/Skipped 2 images/);
   });
 });

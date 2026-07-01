@@ -70,6 +70,10 @@ export function validateConfig(raw: unknown): BotsmanConfig {
       endpoint: typeof telemetryRaw.endpoint === 'string' ? telemetryRaw.endpoint : undefined,
     },
     agent: (c.agent as BotsmanConfig['agent']) ?? {},
+    // Pass through as-is (optional STT). Kept in the returned object so an
+    // updateConfigFile() merge — e.g. /setup saving the Whisper key — doesn't
+    // silently drop it on the next rewrite.
+    transcription: c.transcription as BotsmanConfig['transcription'],
     docker: (c.docker as BotsmanConfig['docker']) ?? {},
     // Default: unix socket shared with the caddy container via a volume —
     // unreachable from deployed services (§5). http:// URLs work for dev.

@@ -143,7 +143,9 @@ There are no modes to remember — write what you want, and Botsman routes it by
 | "change the domain to landing", "смени домен на shop" | **re-points the project** to a new subdomain (asks first), re-issues TLS |
 | "show the load", "clean up disk", "restart todo", "update the server" | runs **server ops** |
 
-You don't have to type everything: **attach a spec document** (`.md`, `.txt`, source, JSON) and Botsman builds or changes from it, or **send a UI mockup or a screenshot of a bug** and the coding agent uses the image as a visual reference. A caption, if you add one, is your instruction.
+You don't have to type everything: **attach a spec document** (`.md`, `.txt`, source, JSON) and Botsman builds or changes from it, or **send one or several UI mockups / bug screenshots in one go** (a whole album works — every image becomes a visual reference for the same task). A caption, if you add one, is your instruction.
+
+Prefer to talk? **Send a voice note** and Botsman transcribes it, shows what it heard, and acts on it just like a typed message. Voice needs a (free) speech-to-text key — turn it on in `/setup → 🎤 Voice` (Groq's free Whisper by default; any OpenAI-compatible endpoint works, or set `GROQ_API_KEY`).
 
 Server reads (metrics, logs, diagnosis) run immediately; anything that changes state asks for a one-tap confirmation, and host-level actions (OS update, Botsman self-update) ask twice.
 

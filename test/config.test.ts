@@ -27,6 +27,27 @@ describe('updateConfigFile agent.model merge', () => {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it('persists the transcription key through save/load and a later updateConfigFile', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'botsman-cfg-'));
+    process.env.BOTSMAN_HOME = home;
+    try {
+      // /setup → 🎤 Voice writes the key; it must survive the field-by-field
+      // validateConfig rebuild on every subsequent rewrite.
+      updateConfigFile({ ...valid, transcription: { apiKey: 'gsk_secret' } });
+      expect(loadConfig().transcription?.apiKey).toBe('gsk_secret');
+      // An UNRELATED later change (e.g. model) must not drop the key.
+      const after = updateConfigFile({ agent: { model: 'opus' } });
+      expect(after.transcription?.apiKey).toBe('gsk_secret');
+      expect(loadConfig().transcription?.apiKey).toBe('gsk_secret');
+      // setup:voiceoff clears it.
+      const off = updateConfigFile({ transcription: undefined });
+      expect(off.transcription).toBeUndefined();
+      expect(loadConfig().transcription).toBeUndefined();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('validateConfig', () => {

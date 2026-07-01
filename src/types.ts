@@ -99,6 +99,18 @@ export interface BotsmanConfig {
     timeoutMs?: number;
     model?: string;
   };
+  /**
+   * Optional speech-to-text for voice notes, via an OpenAI-compatible Whisper
+   * endpoint (Groq's free `whisper-large-v3` by default). When unset — and no
+   * GROQ_API_KEY / OPENAI_API_KEY env var is present — voice notes are politely
+   * refused. Anthropic auth can't read audio, hence a separate provider.
+   */
+  transcription?: {
+    apiKey?: string;
+    endpoint?: string;
+    model?: string;
+    language?: string;
+  };
   /** Docker / proxy endpoints; defaults fit the docker-compose layout. */
   docker?: {
     socketPath?: string;

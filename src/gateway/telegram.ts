@@ -32,8 +32,12 @@ import {
   isImage, extractDocText, buildDocInstruction, buildImageInstruction, imageFileName,
   MAX_DOC_BYTES, MAX_IMAGE_BYTES,
   docAcceptedMsg, docTooBigMsg, docBinaryMsg, imageAcceptedMsg, imageTooBigMsg,
-  downloadFailedMsg, voiceUnsupportedMsg, otherUnsupportedMsg,
+  someImagesTooBigMsg, downloadFailedMsg, otherUnsupportedMsg,
 } from './ingest.js';
+import {
+  resolveTranscriptionSettings, transcribeAudio, audioFileName, MAX_AUDIO_BYTES,
+  voiceTranscribingMsg, voiceHeardMsg, voiceEmptyMsg, voiceFailedMsg, voiceTooBigMsg, voiceNotConfiguredMsg,
+} from './transcribe.js';
 import { versionLine } from '../version.js';
 import type { Store } from '../db.js';
 import type { Telemetry } from '../telemetry.js';
@@ -53,6 +57,20 @@ const STAGE_LABELS: Record<Stage, string> = {
 };
 
 const HEARTBEAT_MS = 25_000; // never silent longer than 30s (§4 EPIC B)
+
+// A Telegram album (several photos in one send) arrives as separate updates
+// sharing a media_group_id, with no "that's all" signal. Buffer them and fire
+// shortly after the last one lands. Telegram caps an album at 10 items.
+const ALBUM_DEBOUNCE_MS = 1_200;
+const MAX_ALBUM_IMAGES = 10;
+
+/** One image of an album, queued for download once the album is complete. */
+interface AlbumImage {
+  fileId: string;
+  size: number;
+  name: string;
+  mime?: string;
+}
 
 // Server-keyboard taps → the devops op they run. Read-only ops run instantly;
 // the mutating ones reuse the confirm flow (Update is host-level → 2 confirms).
@@ -79,19 +97,33 @@ export class TelegramGateway {
   /** project awaiting a tap-to-confirm /delete; messageId guards stale buttons. */
   private pendingDelete = new Map<number, { messageId: number; slug: string }>();
   /** free text awaiting "new or edit?" disambiguation, keyed by chat; messageId guards stale buttons.
-   *  Carries an optional attachment so an image disambiguation still delivers the file. */
-  private pendingAmbiguous = new Map<number, { messageId: number; text: string; attachment?: TaskAttachment }>();
+   *  Carries optional attachments so an image disambiguation still delivers the files. */
+  private pendingAmbiguous = new Map<number, { messageId: number; text: string; attachments?: TaskAttachment[] }>();
   /** DevOps op awaiting a confirm button; messageId guards stale clicks. */
   private pendingDevOps = new Map<number, { messageId: number; op: DevOpsOp; confirmed: boolean }>();
   /** A domain change awaiting its ✅ confirm; messageId guards stale clicks. */
   private pendingDomainChange = new Map<number, { messageId: number; slug: string; host: string }>();
   /** A failed task offering a 🔁 Retry; messageId guards stale buttons. Keeps the
-   *  attachment so a retried image build re-delivers the reference file. */
-  private pendingRetry = new Map<number, { messageId: number; kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachment?: TaskAttachment }>();
+   *  attachments so a retried image build re-delivers the reference files. */
+  private pendingRetry = new Map<number, { messageId: number; kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachments?: TaskAttachment[] }>();
   /** Cancel fns for still-queued tasks, keyed by their status message id (🚫 Cancel). */
   private pendingTaskCancel = new Map<number, () => boolean>();
-  /** media_group ids seen recently, so an album (N photos = N updates) doesn't spawn N tasks. */
-  private seenMediaGroups = new Map<string, number>();
+  /** Photos buffered by media_group_id while an album is still arriving (Telegram
+   *  sends each photo of an album as its own update). A short debounce gathers
+   *  them, then ALL of them go to one task as reference images. */
+  private pendingAlbums = new Map<string, {
+    ctx: Context;
+    images: AlbumImage[];
+    caption?: string;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  /** media_group ids already dispatched (timestamped, briefly kept). Guards the
+   *  rare case where an album's photos straddle two long-poll batches: a straggler
+   *  arriving after the debounce fired must NOT spawn a second task. */
+  private flushedAlbums = new Map<string, number>();
+  /** Chats currently pasting a Whisper API key via /setup → 🎤 Voice. The next
+   *  text message is captured as the key (and then deleted). */
+  private expectingVoiceKey = new Set<number>();
   /** Chats with a 🔍 Review agent run in flight — debounces repeated taps. */
   private reviewing = new Set<number>();
 
@@ -300,6 +332,34 @@ export class TelegramGateway {
           : '';
         await ctx.reply(`✓ Now using ${modelLabel(id)} — no restart needed.${busy}`);
         logger.info('model changed', { model: id });
+        return;
+      }
+
+      // Voice (STT): paste a Whisper key to switch it on, or turn it off. No
+      // restart — the voice handler reads the key live from config on each note.
+      if (data === 'setup:voice') {
+        await ctx.answerCallbackQuery();
+        const on = !!this.transcriptionSettings();
+        const kb = new InlineKeyboard();
+        if (on) kb.text('🔕 Turn off voice', 'setup:voiceoff');
+        this.expectingVoiceKey.add(chatId);
+        await ctx.reply(
+          (on
+            ? '🎤 Voice is on. Paste a new key to replace it, or turn it off below.\n\n'
+            : '🎤 Turn on voice transcription.\n\n') +
+            'Get a FREE key at console.groq.com (it starts with `gsk_`), then paste it here. ' +
+            'OpenAI keys (`sk-…`) work too.\n' +
+            '_I will delete your message right after saving the key._',
+          { parse_mode: 'Markdown', reply_markup: kb.inline_keyboard.flat().length ? kb : undefined },
+        );
+        return;
+      }
+      if (data === 'setup:voiceoff') {
+        await ctx.answerCallbackQuery({ text: 'Voice off' });
+        this.expectingVoiceKey.delete(chatId);
+        try { updateConfigFile({ transcription: undefined }); } catch { /* ignore */ }
+        await ctx.reply('🔕 Voice transcription turned off. Re-enable any time with /setup → 🎤 Voice.');
+        logger.info('voice transcription disabled');
         return;
       }
 
@@ -592,7 +652,7 @@ export class TelegramGateway {
         }
         this.pendingRetry.delete(chatId);
         await ctx.answerCallbackQuery({ text: 'Retrying…' });
-        return void this.runTask(entry.kind, entry.slug, entry.instruction, ctx, entry.attachment);
+        return void this.runTask(entry.kind, entry.slug, entry.instruction, ctx, entry.attachments);
       }
 
       // 🚫 Cancel a still-queued task. Keyed by the status message's id; a no-op
@@ -625,9 +685,9 @@ export class TelegramGateway {
       }
       this.pendingAmbiguous.delete(chatId);
       if (data === 'intent:new') {
-        await this.runTask('create', undefined, pending.text, ctx, pending.attachment);
+        await this.runTask('create', undefined, pending.text, ctx, pending.attachments);
       } else if (data.startsWith('intent:edit:')) {
-        await this.runTask('edit', data.slice('intent:edit:'.length), pending.text, ctx, pending.attachment);
+        await this.runTask('edit', data.slice('intent:edit:'.length), pending.text, ctx, pending.attachments);
       }
     });
 
@@ -638,45 +698,11 @@ export class TelegramGateway {
     this.bot.command('version', (ctx) => ctx.reply(versionLine()));
 
     this.bot.on('message:text', async (ctx) => {
-      const chatId = ctx.chat.id;
       const text = ctx.message.text.trim();
-
-      // A focus shortcut (keyboard button / NL "go to X") wins — instant, free.
-      const slugs = this.store.listProjects().map((p) => p.slug);
-      const switchTo = detectRoomSwitch(text, slugs);
-      if (switchTo === 'projects') return void this.showProjectPicker(ctx);
-      if (switchTo?.kind === 'project') return void this.switchRoom(ctx, switchTo);
-      if (switchTo?.kind === 'home') return void this.switchRoom(ctx, switchTo);
-      if (switchTo?.kind === 'devops') return void this.switchRoom(ctx, switchTo);
-
-      // Project-context keyboard (🚪 Exit · 🔍 Review · 📋 Logs · ↩️ Rollback) —
-      // handled deterministically, no LLM, so it works even when the router is
-      // down. A multi-word edit that merely mentions "review"/"logs" won't match
-      // (anchored labels). Exit is handled even when focus is already gone (e.g.
-      // the connected project was just deleted) so a stale 🚪 Exit still returns
-      // Home and restores the global keyboard instead of becoming a bogus create.
-      const action = detectProjectAction(text);
-      if (action === 'exit') return void this.switchRoom(ctx, { kind: 'home' });
-      const connected = getFocus(this.store, chatId);
-      if (connected) {
-        if (action === 'review') return void this.reviewProject(ctx, connected);
-        if (action === 'logs') return void this.sendLogs(ctx, connected);
-        if (action === 'code') return void this.sendLocalDevInfo(ctx, connected);
-        if (action === 'domain') return void this.sendDomainInfo(ctx, connected);
-        if (action === 'rollback') {
-          // Mutating → confirm first so a stray keyboard tap can't roll back.
-          return void this.promptMutatingOp(ctx, opLiteral('rollback_service', connected));
-        }
-      }
-
-      // Server/admin room: deterministic one-taps for the server keyboard
-      // (read-only run instantly; mutating ask first). Work even if the LLM is down.
-      if (inServerRoom(this.store, chatId)) {
-        const sa = detectServerAction(text);
-        if (sa) return void this.runServerAction(ctx, sa);
-      }
-
-      return this.handleMessage(ctx, text);
+      // A /setup → 🎤 Voice key paste in flight: capture this message as the key
+      // (and delete it) instead of routing it as a build request.
+      if (this.expectingVoiceKey.has(ctx.chat.id)) return void this.captureVoiceKey(ctx, text);
+      return this.routeText(ctx, text);
     });
 
     // Attachments: a text DOCUMENT (a spec to build from) and an IMAGE (a UI
@@ -685,15 +711,63 @@ export class TelegramGateway {
     // registered BEFORE the generic catch-all (grammy stops at the first match).
     this.bot.on('message:document', (ctx) => this.handleDocument(ctx));
     this.bot.on('message:photo', (ctx) => this.handlePhoto(ctx));
-    // Anything still unhandled (voice / video / sticker / …): acknowledge it so
-    // "just talk" never meets silence, and say what IS supported.
+    // Voice / audio / round video: transcribe (when a Whisper key is set) and act
+    // on the transcript like typed text. Registered before the catch-all.
+    this.bot.on(['message:voice', 'message:audio', 'message:video_note'], (ctx) => this.handleVoice(ctx));
+    // Anything still unhandled (video / sticker / …): acknowledge it so "just
+    // talk" never meets silence, and say what IS supported.
     this.bot.on('message', async (ctx) => {
-      const m = ctx.message;
-      const isVoice = !!(m?.voice || m?.audio || m?.video_note);
-      await ctx.reply(isVoice ? voiceUnsupportedMsg : otherUnsupportedMsg);
+      await ctx.reply(otherUnsupportedMsg);
     });
 
     this.bot.catch((err) => logger.error('telegram handler error', { error: String(err.error) }));
+  }
+
+  /**
+   * Route a typed (or transcribed) message exactly like a chat line: focus
+   * shortcuts and project/server one-taps first (deterministic, no LLM), then
+   * the content router. Shared by `message:text` and the voice handler so a
+   * spoken "go home" / "show load" / "add a dark theme" behaves identically.
+   */
+  private async routeText(ctx: Context, text: string): Promise<void> {
+    const chatId = ctx.chat!.id;
+
+    // A focus shortcut (keyboard button / NL "go to X") wins — instant, free.
+    const slugs = this.store.listProjects().map((p) => p.slug);
+    const switchTo = detectRoomSwitch(text, slugs);
+    if (switchTo === 'projects') return void this.showProjectPicker(ctx);
+    if (switchTo?.kind === 'project') return void this.switchRoom(ctx, switchTo);
+    if (switchTo?.kind === 'home') return void this.switchRoom(ctx, switchTo);
+    if (switchTo?.kind === 'devops') return void this.switchRoom(ctx, switchTo);
+
+    // Project-context keyboard (🚪 Exit · 🔍 Review · 📋 Logs · ↩️ Rollback) —
+    // handled deterministically, no LLM, so it works even when the router is
+    // down. A multi-word edit that merely mentions "review"/"logs" won't match
+    // (anchored labels). Exit is handled even when focus is already gone (e.g.
+    // the connected project was just deleted) so a stale 🚪 Exit still returns
+    // Home and restores the global keyboard instead of becoming a bogus create.
+    const action = detectProjectAction(text);
+    if (action === 'exit') return void this.switchRoom(ctx, { kind: 'home' });
+    const connected = getFocus(this.store, chatId);
+    if (connected) {
+      if (action === 'review') return void this.reviewProject(ctx, connected);
+      if (action === 'logs') return void this.sendLogs(ctx, connected);
+      if (action === 'code') return void this.sendLocalDevInfo(ctx, connected);
+      if (action === 'domain') return void this.sendDomainInfo(ctx, connected);
+      if (action === 'rollback') {
+        // Mutating → confirm first so a stray keyboard tap can't roll back.
+        return void this.promptMutatingOp(ctx, opLiteral('rollback_service', connected));
+      }
+    }
+
+    // Server/admin room: deterministic one-taps for the server keyboard
+    // (read-only run instantly; mutating ask first). Work even if the LLM is down.
+    if (inServerRoom(this.store, chatId)) {
+      const sa = detectServerAction(text);
+      if (sa) return void this.runServerAction(ctx, sa);
+    }
+
+    return this.handleMessage(ctx, text);
   }
 
   // --- soft-context routing ---
@@ -783,15 +857,20 @@ export class TelegramGateway {
 
   /** The /setup menu (also reached from the Home panel's 🔧 Setup button). */
   private async sendSetupMenu(ctx: Context): Promise<void> {
+    const voiceOn = !!this.transcriptionSettings();
     const kb = new InlineKeyboard()
       .text('🔑 Coding agent auth', 'setup:auth')
       .text('🌐 Domain', 'setup:domain')
       .row()
       .text('🧠 Model', 'setup:model')
-      .text('📊 Toggle telemetry', 'setup:telemetry');
-    await ctx.reply(`What do you want to change? Current model: ${modelLabel(this.currentModel())}.`, {
-      reply_markup: kb,
-    });
+      .text('📊 Toggle telemetry', 'setup:telemetry')
+      .row()
+      .text(voiceOn ? '🎤 Voice (on)' : '🎤 Voice (off)', 'setup:voice');
+    await ctx.reply(
+      `What do you want to change? Current model: ${modelLabel(this.currentModel())}. ` +
+        `Voice transcription is ${voiceOn ? 'on' : 'off'}.`,
+      { reply_markup: kb },
+    );
   }
 
   private async showProjectPicker(ctx: Context): Promise<void> {
@@ -877,11 +956,11 @@ export class TelegramGateway {
    * (fuzzy/transliterated name match), then the rest, so "improve X" is one tap.
    * `thinkingId` is an existing "💭…" message to edit, or null to send fresh.
    */
-  private async createOrAsk(ctx: Context, description: string, slugs: string[], thinkingId: number | null, attachment?: TaskAttachment): Promise<void> {
+  private async createOrAsk(ctx: Context, description: string, slugs: string[], thinkingId: number | null, attachments?: TaskAttachment[]): Promise<void> {
     const chatId = ctx.chat!.id;
     if (slugs.length === 0) {
       if (thinkingId) await this.deleteMessage(chatId, thinkingId);
-      return void this.runTask('create', undefined, description, ctx, attachment);
+      return void this.runTask('create', undefined, description, ctx, attachments);
     }
     const similar = findSimilarProject(description, slugs);
     const ordered = similar ? [similar, ...slugs.filter((s) => s !== similar)] : slugs;
@@ -906,10 +985,10 @@ export class TelegramGateway {
       (similar ? `\nThis looks related to ${similar}.` : '') + more;
     if (thinkingId) {
       await this.bot.api.editMessageText(chatId, thinkingId, body, { reply_markup: kb }).catch(() => {});
-      this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: description, attachment });
+      this.pendingAmbiguous.set(chatId, { messageId: thinkingId, text: description, attachments });
     } else {
       const sent = await ctx.reply(body, { reply_markup: kb });
-      this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text: description, attachment });
+      this.pendingAmbiguous.set(chatId, { messageId: sent.message_id, text: description, attachments });
     }
   }
 
@@ -1329,47 +1408,39 @@ export class TelegramGateway {
     return Buffer.from(await res.arrayBuffer());
   }
 
-  /** First photo of an album returns true; the rest of the same media_group are
-   *  dropped, so sending N screenshots at once doesn't spawn N projects/edits. */
-  private firstOfMediaGroup(id?: string): boolean {
-    if (!id) return true;
-    const now = Date.now();
-    for (const [k, t] of this.seenMediaGroups) if (now - t > 60_000) this.seenMediaGroups.delete(k);
-    if (this.seenMediaGroups.has(id)) return false;
-    this.seenMediaGroups.set(id, now);
-    return true;
-  }
-
-  /** Route an attachment-derived task. The agent payload (doc body / image ref)
+  /** Route an attachment-derived task. The agent payload (doc body / image refs)
    *  is decided here, but the create-vs-edit TARGET is read from the CAPTION only
    *  (never the payload) — so a slug mentioned inside a 15 KB spec can't silently
    *  retarget, and the body never enters the router prompt. Connected → edit;
-   *  otherwise create-or-confirm via createOrAsk (which carries the attachment). */
-  private async routeAttachment(ctx: Context, caption: string | undefined, payload: string, attachment?: TaskAttachment): Promise<void> {
+   *  otherwise create-or-confirm via createOrAsk (which carries the attachments). */
+  private async routeAttachment(ctx: Context, caption: string | undefined, payload: string, attachments?: TaskAttachment[]): Promise<void> {
     const chatId = ctx.chat!.id;
     const focused = getFocus(this.store, chatId);
-    if (focused) return void this.runTask('edit', focused, payload, ctx, attachment);
+    if (focused) return void this.runTask('edit', focused, payload, ctx, attachments);
     const slugs = this.store.listProjects().map((p) => p.slug);
     const cap = (caption ?? '').trim();
     if (cap) {
       const intent = detectIntent(cap, slugs, null); // null: don't auto-target via stale last_active
-      if (intent.kind === 'edit') return void this.runTask('edit', intent.slug, payload, ctx, attachment);
+      if (intent.kind === 'edit') return void this.runTask('edit', intent.slug, payload, ctx, attachments);
     }
     // create (explicit, or no caption) → confirm against existing projects when
     // any exist (mirrors the typed-text path); builds straight away if none.
-    await this.createOrAsk(ctx, payload, slugs, null, attachment);
+    await this.createOrAsk(ctx, payload, slugs, null, attachments);
   }
 
   /** A document attachment: an image-as-file becomes an image; a text spec is
    *  decoded and routed like a typed request; anything else is refused. */
   private async handleDocument(ctx: Context): Promise<void> {
+    this.expectingVoiceKey.delete(ctx.chat!.id); // an attachment ends any key-wait
     const doc = ctx.message?.document;
     if (!doc) return;
     const name = doc.file_name ?? 'document';
     const caption = ctx.message?.caption;
     if (isImage(name, doc.mime_type)) {
-      if (!this.firstOfMediaGroup(ctx.message?.media_group_id)) return;
-      return void this.handleImage(ctx, doc.file_id, doc.file_size ?? 0, name, doc.mime_type, caption);
+      const img: AlbumImage = { fileId: doc.file_id, size: doc.file_size ?? 0, name, mime: doc.mime_type };
+      const groupId = ctx.message?.media_group_id;
+      if (groupId) return void this.collectAlbumImage(ctx, groupId, img, caption);
+      return void this.handleImages(ctx, [img], caption);
     }
     if ((doc.file_size ?? 0) > MAX_DOC_BYTES) return void ctx.reply(docTooBigMsg(name, doc.file_size!));
     let bytes: Buffer;
@@ -1387,38 +1458,182 @@ export class TelegramGateway {
     await this.routeAttachment(ctx, caption, buildDocInstruction({ caption, body: res.text, name }));
   }
 
-  /** A compressed photo: pick the largest size and treat it as a reference image. */
+  /** A compressed photo: pick the largest size and treat it as a reference image.
+   *  Several photos sent at once share a media_group_id and arrive as separate
+   *  updates → buffer them so the whole album reaches one task. */
   private async handlePhoto(ctx: Context): Promise<void> {
-    if (!this.firstOfMediaGroup(ctx.message?.media_group_id)) return;
+    this.expectingVoiceKey.delete(ctx.chat!.id); // an attachment ends any key-wait
     const sizes = ctx.message?.photo;
     if (!sizes?.length) return;
     const largest = sizes[sizes.length - 1]; // PhotoSize[] is ascending by resolution
-    await this.handleImage(ctx, largest.file_id, largest.file_size ?? 0, 'photo.jpg', 'image/jpeg', ctx.message?.caption);
+    const img: AlbumImage = { fileId: largest.file_id, size: largest.file_size ?? 0, name: 'photo.jpg', mime: 'image/jpeg' };
+    const groupId = ctx.message?.media_group_id;
+    if (groupId) return void this.collectAlbumImage(ctx, groupId, img, ctx.message?.caption);
+    await this.handleImages(ctx, [img], ctx.message?.caption);
   }
 
-  /** Deliver an image to the agent: download it, write it into the project dir
-   *  (visible at /work) and reference it in the instruction. Connected project →
-   *  edit it; otherwise route as a create (confirmed against existing projects). */
-  private async handleImage(
-    ctx: Context, fileId: string, size: number, name: string, mime: string | undefined, caption?: string,
-  ): Promise<void> {
-    if (size > MAX_IMAGE_BYTES) return void ctx.reply(imageTooBigMsg);
+  /** Buffer one image of an in-flight album; (re)arm a short debounce so the task
+   *  fires once shortly after the LAST photo lands. Telegram puts the caption on
+   *  exactly one item of the album — keep the first one we see. */
+  private collectAlbumImage(ctx: Context, groupId: string, img: AlbumImage, caption?: string): void {
+    const now = Date.now();
+    for (const [k, t] of this.flushedAlbums) if (now - t > 60_000) this.flushedAlbums.delete(k);
+    // Already dispatched (a late straggler across poll batches) → drop it rather
+    // than start a duplicate task. Losing one rare stray photo beats a second build.
+    if (this.flushedAlbums.has(groupId)) return;
+    const cap = caption?.trim() || undefined;
+    const existing = this.pendingAlbums.get(groupId);
+    if (existing) {
+      if (existing.images.length < MAX_ALBUM_IMAGES) existing.images.push(img);
+      if (cap && !existing.caption) existing.caption = cap;
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => void this.flushAlbum(groupId), ALBUM_DEBOUNCE_MS);
+      return;
+    }
+    this.pendingAlbums.set(groupId, {
+      ctx,
+      images: [img],
+      caption: cap,
+      timer: setTimeout(() => void this.flushAlbum(groupId), ALBUM_DEBOUNCE_MS),
+    });
+  }
+
+  /** The debounce elapsed: hand the gathered album off as one task. */
+  private async flushAlbum(groupId: string): Promise<void> {
+    const album = this.pendingAlbums.get(groupId);
+    if (!album) return;
+    this.pendingAlbums.delete(groupId);
+    this.flushedAlbums.set(groupId, Date.now()); // any straggler now gets dropped
+    await this.handleImages(album.ctx, album.images, album.caption);
+  }
+
+  /** Deliver one or more reference images to the agent: download each, write them
+   *  into the project dir (visible at /work) and reference them in a single
+   *  instruction. Connected project → edit it; otherwise route as a create
+   *  (confirmed against existing projects). Oversized/failed images are skipped
+   *  rather than failing the whole batch. */
+  private async handleImages(ctx: Context, images: AlbumImage[], caption?: string): Promise<void> {
+    const chatId = ctx.chat!.id;
+    const limited = images.slice(0, MAX_ALBUM_IMAGES);
+    const multi = limited.length > 1;
+    const attachments: TaskAttachment[] = [];
+    // Track the two skip reasons apart: an oversized image and a failed download
+    // need DIFFERENT advice (shrink it vs just resend it). Conflating them was a
+    // regression — a single photo whose download hiccups would be told to shrink.
+    let tooBig = 0;
+    let failed = 0;
+    for (const img of limited) {
+      if (img.size > MAX_IMAGE_BYTES) { tooBig++; continue; }
+      let bytes: Buffer;
+      try {
+        bytes = await this.downloadTgFile(img.fileId);
+      } catch (e) {
+        logger.warn('image download failed', { error: String((e as Error).message) });
+        failed++;
+        continue; // one bad download shouldn't sink the rest of the album
+      }
+      if (bytes.length > MAX_IMAGE_BYTES) { tooBig++; continue; }
+      // Single image keeps the legacy "reference.png"; an album gets unique,
+      // 1-based names (reference1.png, reference2.jpg, …) so they never collide.
+      const name = imageFileName(img.name, img.mime, multi ? attachments.length + 1 : undefined);
+      attachments.push({ name, bytes });
+    }
+    if (!attachments.length) {
+      // Prefer the size message only when size is why nothing survived.
+      return void ctx.reply(tooBig ? imageTooBigMsg : downloadFailedMsg);
+    }
+    if (tooBig) await ctx.reply(someImagesTooBigMsg(tooBig));
+    const fileRefs = attachments.map((a) => a.name);
+    const cap = caption?.trim() || undefined;
+    const connected = getFocus(this.store, chatId);
+    if (connected) {
+      await ctx.reply(imageAcceptedMsg(connected, !!cap, attachments.length));
+      return void this.runTask('edit', connected, buildImageInstruction({ caption: cap, fileRefs, mode: 'edit' }), ctx, attachments);
+    }
+    await this.routeAttachment(ctx, cap, buildImageInstruction({ caption: cap, fileRefs, mode: 'create' }), attachments);
+  }
+
+  /** Voice / audio / round video → text. Transcribes via the configured Whisper
+   *  endpoint (when a key is set), echoes what it heard, then routes the
+   *  transcript exactly like a typed message. */
+  private async handleVoice(ctx: Context): Promise<void> {
+    this.expectingVoiceKey.delete(ctx.chat!.id); // a voice note ends any key-wait
+    const m = ctx.message;
+    const voice = m?.voice;
+    const audio = m?.audio;
+    const note = m?.video_note;
+    const file = voice ?? audio ?? note;
+    if (!file) return;
+    const settings = this.transcriptionSettings();
+    if (!settings) return void ctx.reply(voiceNotConfiguredMsg);
+    if ((file.file_size ?? 0) > MAX_AUDIO_BYTES) return void ctx.reply(voiceTooBigMsg);
+
+    const chatId = ctx.chat!.id;
+    const status = await ctx.reply(voiceTranscribingMsg);
+    const finish = (text: string): Promise<unknown> =>
+      this.bot.api.editMessageText(chatId, status.message_id, text).catch(() => {});
     let bytes: Buffer;
     try {
-      bytes = await this.downloadTgFile(fileId);
+      bytes = await this.downloadTgFile(file.file_id);
     } catch (e) {
-      logger.warn('image download failed', { error: String((e as Error).message) });
-      return void ctx.reply(downloadFailedMsg);
+      logger.warn('voice download failed', { error: String((e as Error).message) });
+      return void finish(downloadFailedMsg);
     }
-    if (bytes.length > MAX_IMAGE_BYTES) return void ctx.reply(imageTooBigMsg);
-    const fileRef = imageFileName(name, mime);
-    const attachment: TaskAttachment = { name: fileRef, bytes };
-    const connected = getFocus(this.store, ctx.chat!.id);
-    if (connected) {
-      await ctx.reply(imageAcceptedMsg(connected, !!caption?.trim()));
-      return void this.runTask('edit', connected, buildImageInstruction({ caption, fileRef, mode: 'edit' }), ctx, attachment);
+    const kind = voice ? 'voice' : audio ? 'audio' : 'video_note';
+    const fileName = audioFileName(kind, audio?.file_name);
+    const mime = voice?.mime_type ?? audio?.mime_type;
+    const result = await transcribeAudio({ bytes, fileName, mime, settings });
+    if (!result.ok) {
+      const msg = result.reason === 'empty' ? voiceEmptyMsg
+        : result.reason === 'too_big' ? voiceTooBigMsg
+        : voiceFailedMsg;
+      return void finish(msg);
     }
-    await this.routeAttachment(ctx, caption, buildImageInstruction({ caption, fileRef, mode: 'create' }), attachment);
+    // Show what we heard (so a misheard word is visible), then act on it.
+    await finish(voiceHeardMsg(result.text));
+    await this.routeText(ctx, result.text);
+  }
+
+  /** Resolve speech-to-text settings live from config + env, or null when off.
+   *  Read per message so adding a key via /setup takes effect with no restart. */
+  private transcriptionSettings() {
+    try {
+      return resolveTranscriptionSettings(updateConfigFile({}).transcription, process.env);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Capture a pasted Whisper API key (from /setup → 🎤 Voice), save it, and
+   *  delete the user's message since it carries a secret. */
+  private async captureVoiceKey(ctx: Context, raw: string): Promise<void> {
+    const chatId = ctx.chat!.id;
+    // Whatever happens, we stop expecting a key after ONE message — so a stray
+    // build request or keyboard tap can never trap the chat waiting for a key.
+    this.expectingVoiceKey.delete(chatId);
+    const trimmed = raw.trim();
+    if (/^(\/cancel|cancel|отмена)$/i.test(trimmed)) {
+      return void ctx.reply('OK — left voice settings unchanged.');
+    }
+    const key = trimmed.replace(/\s+/g, '');
+    // Providers vary (Groq `gsk_…`, OpenAI `sk-…`, or a bare token on a custom
+    // endpoint). Anything that clearly ISN'T a key — a keyboard tap, a build
+    // request — is the user moving on: route it normally instead of rejecting it.
+    const looksLikeKey = /^(gsk_|sk-)\S{8,}$/.test(trimmed) || (!/\s/.test(trimmed) && key.length >= 24);
+    if (!looksLikeKey) return this.routeText(ctx, trimmed);
+    let deleted = false;
+    try { await ctx.deleteMessage(); deleted = true; } catch { /* user may need to delete it */ }
+    try {
+      const cfg = updateConfigFile({});
+      updateConfigFile({ transcription: { ...cfg.transcription, apiKey: key } });
+    } catch (e) {
+      logger.warn('failed to save transcription key', { error: String((e as Error).message) });
+      return void ctx.reply("I couldn't save that key — please try /setup → 🎤 Voice again.");
+    }
+    logger.info('voice transcription enabled');
+    await ctx.reply(
+      `✓ Voice transcription is on — send me a voice note and I'll act on it.${deleted ? ' Your message with the key has been deleted.' : ' ⚠️ Please delete your message with the key.'}`,
+    );
   }
 
   /** Run a long task with a live-updating status message + 30s heartbeat. */
@@ -1427,7 +1642,7 @@ export class TelegramGateway {
     slug: string | undefined,
     instruction: string,
     ctx: Context,
-    attachment?: TaskAttachment,
+    attachments?: TaskAttachment[],
   ): Promise<void> {
     const chatId = ctx.chat!.id;
     // When something is already running, this task WAITS — say so clearly and
@@ -1511,12 +1726,12 @@ export class TelegramGateway {
         slug,
         // Register the cancel fn only while queued; the button uses it by messageId.
         (cancel) => { if (wasQueued) this.pendingTaskCancel.set(statusMsg.message_id, cancel); },
-        attachment,
+        attachments,
       );
       finished = true;
       stopTicks();
       this.pendingTaskCancel.delete(statusMsg.message_id);
-      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction, attachment }, Date.now() - runStartedAt);
+      await this.reportOutcome(ctx, chatId, statusMsg.message_id, outcome, { kind, slug, instruction, attachments }, Date.now() - runStartedAt);
       if (outcome.slug) this.store.kvSet(`last_active:${chatId}`, outcome.slug);
       // A fresh build → connect to it, so the next message goes straight to the
       // new project and the persistent bar becomes its actions (the outcome
@@ -1543,14 +1758,14 @@ export class TelegramGateway {
       await this.reportOutcome(
         ctx, chatId, statusMsg.message_id,
         { ok: false, slug: slug ?? '', error: (e as Error).message },
-        { kind, slug, instruction, attachment },
+        { kind, slug, instruction, attachments },
       );
     }
   }
 
   private async reportOutcome(
     ctx: Context, chatId: number, statusMsgId: number, o: TaskOutcome,
-    retry?: { kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachment?: TaskAttachment },
+    retry?: { kind: 'create' | 'resume' | 'edit' | 'rollback'; slug?: string; instruction: string; attachments?: TaskAttachment[] },
     elapsedMs?: number,
   ): Promise<void> {
     if (o.cancelled) {
