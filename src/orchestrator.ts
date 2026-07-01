@@ -33,6 +33,14 @@ export interface TaskOutcome {
   error?: string;
   /** True when the task was cancelled while still queued (never ran). */
   cancelled?: boolean;
+  /**
+   * Whether this task actually promoted a NEW image to production. True after a
+   * real build+deploy; false on the "nothing to ship" path (agent made no
+   * change, or HEAD is already the live commit). The gateway uses this to keep
+   * the "deployed" banner honest — an unchanged run must not claim a deploy.
+   * Undefined where the notion doesn't apply (delete, cancel, error).
+   */
+  deployed?: boolean;
 }
 
 /** A file the owner attached (image mockup / bug screenshot) to be written into
@@ -224,18 +232,15 @@ export class Orchestrator {
       }
 
       report('committing');
-      const commit = await commitAll(slug, description);
-      if (!commit) {
-        const err = 'The agent did not create any files. Try rephrasing the request.';
-        this.store.setStatus(slug, 'failed');
-        this.store.finishTask(task.id, 'failed', undefined, err);
-        return { ok: false, slug, error: err, costUsd: gen.costUsd };
-      }
+      // Whether the commit is ours or the agent's own (a headless run can commit
+      // its work itself, leaving the tree clean), what matters is that the repo
+      // now has a HEAD to build. Gate on HEAD, not on "did WE create a commit".
+      await commitAll(slug, description);
+      const commit = await headCommit(slug);
       // The agent reported success but left only the seeded .gitignore/CLAUDE.md
-      // — it produced no application files at all. commitAll still returns a
-      // commit (the seeds are new), so the "no files" check above can't catch
-      // this. Fail with a clear message instead of deploying an empty project.
-      if (!agentProducedAppFiles(slug, attachments?.map((a) => a.name))) {
+      // — it produced no application files at all. A HEAD may still exist (the
+      // seeds are committed), so check the tree contents, not just the commit.
+      if (!commit || !agentProducedAppFiles(slug, attachments?.map((a) => a.name))) {
         const err =
           'The agent finished without creating any application files. ' +
           'Try rephrasing the request with a bit more detail about what to build.';
@@ -256,7 +261,7 @@ export class Orchestrator {
       report('done');
       return {
         ok: true, slug, url: deployed.url, screenshotPath: deployed.screenshotPath,
-        summary: gen.summary, warning: deployed.warning, costUsd: gen.costUsd,
+        summary: gen.summary, warning: deployed.warning, costUsd: gen.costUsd, deployed: true,
       };
     } catch (e) {
       this.store.setStatus(slug, 'failed');
@@ -298,17 +303,24 @@ export class Orchestrator {
       }
 
       report('committing');
-      const commit = await commitAll(slug, instruction);
-      if (!commit) {
+      // commitAll may return null even when the agent DID change things: a
+      // headless Claude Code run can commit its own work, leaving the tree clean.
+      // So we can't gate the deploy on "did WE create a commit" — we gate it on
+      // "is the working tree's HEAD ahead of what's actually live". This is the
+      // fix for the silent-no-deploy bug: an agent self-commit still ships.
+      await commitAll(slug, instruction);
+      const head = await headCommit(slug);
+      if (!head || head === project.currentCommit) {
+        // Genuinely nothing new to ship (no file change, or HEAD already live).
         this.store.finishTask(task.id, 'done', gen.summary ?? 'No changes were needed.');
         return {
-          ok: true, slug, url: `https://${project.domain}/`,
+          ok: true, slug, url: `https://${project.domain}/`, deployed: false,
           summary: gen.summary ?? 'The agent made no changes.', costUsd: gen.costUsd,
         };
       }
       await syncToBare(slug);
 
-      const deployed = await this.deployCommit(project, commit, report);
+      const deployed = await this.deployCommit(project, head, report);
       if (!deployed.ok) {
         // AC-C2: failed deploy must not kill the live version — the engine
         // never switched the route; just record the failure.
@@ -323,7 +335,7 @@ export class Orchestrator {
       report('done');
       return {
         ok: true, slug, url: deployed.url, screenshotPath: deployed.screenshotPath,
-        summary: gen.summary, warning: deployed.warning, costUsd: gen.costUsd,
+        summary: gen.summary, warning: deployed.warning, costUsd: gen.costUsd, deployed: true,
       };
     } catch (e) {
       this.store.finishTask(task.id, 'failed', undefined, (e as Error).message);
@@ -382,12 +394,12 @@ export class Orchestrator {
       // A push with no new commits (or a re-push of the deployed commit) is a no-op.
       if (commit === project.currentCommit && await this.deployEngine.containerRunning(slug)) {
         this.store.finishTask(task.id, 'done', 'already up to date');
-        return { ok: true, slug, url: `https://${project.domain}/`, summary: 'Already up to date — the pushed commit is live.' };
+        return { ok: true, slug, url: `https://${project.domain}/`, deployed: false, summary: 'Already up to date — the pushed commit is live.' };
       }
       const deployed = await this.deployCommit(project, commit, report);
       this.store.finishTask(task.id, deployed.ok ? 'done' : 'failed', undefined, deployed.error);
       return deployed.ok
-        ? { ok: true, slug, url: deployed.url, screenshotPath: deployed.screenshotPath, summary: 'Redeployed from git push.' }
+        ? { ok: true, slug, url: deployed.url, screenshotPath: deployed.screenshotPath, deployed: true, summary: 'Redeployed from git push.' }
         : { ok: false, slug, error: deployed.error };
     } catch (e) {
       this.store.finishTask(task.id, 'failed', undefined, (e as Error).message);

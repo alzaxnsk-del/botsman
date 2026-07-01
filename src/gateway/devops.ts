@@ -322,7 +322,11 @@ export async function runMutatingOp(op: DevOpsOp, deps: DevOpsDeps): Promise<str
       return `✓ Restarted ${op.slug}.`;
     case 'redeploy_service': {
       const o = await deps.orchestrator.enqueue('redeploy', 'git push', () => {}, op.slug!);
-      return o.ok ? `✓ Redeployed ${op.slug}.\n${o.url ?? ''}` : `✗ Redeploy failed: ${o.error}`;
+      if (!o.ok) return `✗ Redeploy failed: ${o.error}`;
+      // Honest: don't claim a redeploy when nothing was rebuilt (HEAD already live).
+      return o.deployed === false
+        ? `ℹ️ ${op.slug} is already up to date — nothing to redeploy.\n${o.url ?? ''}`
+        : `✓ Redeployed ${op.slug}.\n${o.url ?? ''}`;
     }
     case 'rollback_service': {
       const o = await deps.orchestrator.enqueue('rollback', 'rollback', () => {}, op.slug!);

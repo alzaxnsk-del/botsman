@@ -260,6 +260,35 @@ describe('runMutatingOp self_update (messaging + back-online notice)', () => {
   });
 });
 
+describe('runMutatingOp redeploy_service (honest wording)', () => {
+  const op = { op: 'redeploy_service', mutating: true, hostLevel: false, slug: 'memo', humanSummary: '' } as DevOpsOp;
+  function depsWithRedeploy(outcome: { ok: boolean; url?: string; deployed?: boolean; error?: string }): DevOpsDeps {
+    return {
+      store: new Store(':memory:'),
+      docker: {}, deployEngine: {},
+      orchestrator: { enqueue: async () => ({ slug: 'memo', ...outcome }) },
+    } as unknown as DevOpsDeps;
+  }
+
+  it('claims "Redeployed" only when a new image was actually promoted', async () => {
+    const msg = await runMutatingOp(op, depsWithRedeploy({ ok: true, deployed: true, url: 'https://memo.x/' }));
+    expect(msg).toContain('✓ Redeployed memo');
+    expect(msg).toContain('https://memo.x/');
+  });
+
+  it('says "already up to date" instead of falsely claiming a redeploy', async () => {
+    const msg = await runMutatingOp(op, depsWithRedeploy({ ok: true, deployed: false, url: 'https://memo.x/' }));
+    expect(msg).toContain('already up to date');
+    expect(msg).not.toContain('✓ Redeployed');
+  });
+
+  it('surfaces a redeploy failure', async () => {
+    const msg = await runMutatingOp(op, depsWithRedeploy({ ok: false, error: 'docker build: boom' }));
+    expect(msg).toContain('Redeploy failed');
+    expect(msg).toContain('boom');
+  });
+});
+
 describe('isFollowup', () => {
   it('matches terse continuations that are not question-shaped', () => {
     for (const t of ['подробнее', 'ещё', 'дальше', 'продолжай', 'more', 'go on', 'continue', 'details']) {
