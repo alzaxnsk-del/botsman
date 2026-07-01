@@ -161,3 +161,38 @@ export function formatDeployCheck(f: DeployCheckFacts, lang: Lang): string {
   lines.push('', t.next, '', t.whatToChange);
   return lines.join('\n');
 }
+
+// --- edit / rollback outcome --------------------------------------------------
+
+export interface EditOutcomeFacts {
+  slug: string;
+  /**
+   * Whether a NEW image was actually promoted. `false` means the run shipped
+   * nothing (no change, or HEAD already live) — the header must not claim a
+   * deploy. `true`/undefined → a real deploy (undefined keeps older callers,
+   * e.g. rollback, on the "deployed" wording).
+   */
+  deployed?: boolean;
+  url?: string;
+  summary?: string;
+  warning?: string;
+  costUsd?: number;
+}
+
+/**
+ * The concise result card for an edit/rollback of an already-live project.
+ * Honest by construction: only claims "deployed" when a new image actually went
+ * live; the no-change path says so plainly instead of a false ✅. Pure + tested;
+ * the gateway sends it (plus any screenshot).
+ */
+export function formatEditOutcome(o: EditOutcomeFacts): string {
+  const lines: string[] = o.deployed === false
+    ? [`ℹ️ *${o.slug}* — no changes made (nothing to deploy)`]
+    : [`✅ *${o.slug}* — deployed`];
+  if (o.url) lines.push(o.url);
+  if (o.summary) lines.push('', o.summary.slice(0, 2000));
+  if (o.warning) lines.push('', `⚠️ ${o.warning}`);
+  if (o.costUsd && o.costUsd > 0) lines.push('', `💸 Tokens: ≈$${o.costUsd.toFixed(2)}`);
+  lines.push('', 'What should I change?');
+  return lines.join('\n');
+}

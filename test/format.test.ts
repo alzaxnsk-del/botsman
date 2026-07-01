@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { failureMessage, withElapsed, FAIL_DETAIL_MAX, detectLang, formatDeployCheck, type DeployCheckFacts } from '../src/gateway/format.js';
+import { failureMessage, withElapsed, FAIL_DETAIL_MAX, detectLang, formatDeployCheck, formatEditOutcome, type DeployCheckFacts } from '../src/gateway/format.js';
 
 describe('failureMessage', () => {
   it('leads with a plain-language line, names the slug, and points at recovery', () => {
@@ -98,5 +98,29 @@ describe('formatDeployCheck', () => {
     expect(m).not.toContain('⏱'); // under a minute → no time row
     expect(m).not.toContain('Screenshot below');
     expect(m).toContain('Deploy check'); // the constant rows still render
+  });
+});
+
+describe('formatEditOutcome', () => {
+  it('claims "deployed" when a new image actually shipped', () => {
+    const m = formatEditOutcome({ slug: 'memo', deployed: true, url: 'https://memo.x/', summary: 'added footer', costUsd: 0.29 });
+    expect(m).toContain('✅ *memo* — deployed');
+    expect(m).toContain('https://memo.x/');
+    expect(m).toContain('added footer');
+    expect(m).toContain('≈$0.29');
+    expect(m).toContain('What should I change?');
+  });
+
+  it('does NOT claim a deploy when nothing shipped (the honesty fix)', () => {
+    const m = formatEditOutcome({ slug: 'memo', deployed: false, url: 'https://memo.x/', summary: 'no change needed' });
+    expect(m).not.toContain('— deployed');
+    expect(m).toContain('no changes made (nothing to deploy)');
+    expect(m).toContain('no change needed');
+    expect(m).toContain('What should I change?');
+  });
+
+  it('keeps the "deployed" wording when deployed is undefined (rollback back-compat)', () => {
+    const m = formatEditOutcome({ slug: 'memo', url: 'https://memo.x/' });
+    expect(m).toContain('✅ *memo* — deployed');
   });
 });

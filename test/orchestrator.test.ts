@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type Dockerode from 'dockerode';
 import { Orchestrator } from '../src/orchestrator.js';
 import { Store } from '../src/db.js';
@@ -245,7 +246,85 @@ describe('Orchestrator pipeline', () => {
     const o = await orch.enqueue('redeploy', 'git push', () => {}, created.slug);
     expect(o.ok).toBe(true);
     expect(o.summary).toContain('up to date');
+    expect(o.deployed).toBe(false);
     expect(engine.deploys).toHaveLength(1); // no second deploy
+  });
+
+  // The core bug: a headless coding agent can commit its own work, leaving the
+  // working tree clean when the orchestrator's commitAll runs. The deploy must
+  // still fire (gated on HEAD, not on "did WE create the commit").
+  const gitEnv = () => ({
+    ...process.env,
+    GIT_AUTHOR_NAME: 'agent', GIT_AUTHOR_EMAIL: 'agent@x',
+    GIT_COMMITTER_NAME: 'agent', GIT_COMMITTER_EMAIL: 'agent@x',
+  });
+  const selfCommit = (dir: string, message: string) => {
+    execFileSync('git', ['add', '-A'], { cwd: dir, env: gitEnv() });
+    execFileSync('git', ['commit', '-qm', message], { cwd: dir, env: gitEnv() });
+  };
+
+  it('edit: deploys even when the AGENT commits its own work (self-commit bug)', async () => {
+    let n = 0;
+    const agent: CodingAgent = {
+      run: async (input) => {
+        n++;
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), `// v${n}`);
+        // Only the edit run self-commits — create leaves it to the orchestrator.
+        if (input.mode === 'edit') selfCommit(input.projectDir, 'agent: my own commit');
+        return { ok: true, summary: `did ${input.instruction}`, durationMs: 1 };
+      },
+    };
+    const engine = fakeEngine();
+    const orch = makeOrch(agent, engine);
+    const created = await orch.enqueue('create', 'сделай сервис заметок', () => {});
+    expect(engine.deploys).toHaveLength(1);
+    const before = store.getProject(created.slug)!;
+
+    const edited = await orch.enqueue('edit', 'добавь футер', () => {}, created.slug);
+    expect(edited.ok).toBe(true);
+    expect(edited.deployed).toBe(true);
+    expect(engine.deploys).toHaveLength(2); // the agent's self-commit still shipped
+    const after = store.getProject(created.slug)!;
+    expect(after.currentCommit).not.toBe(before.currentCommit);
+    expect(after.currentCommit).toBe(engine.deploys[1]); // HEAD is what got deployed
+  });
+
+  it('edit: a genuinely no-op run ships nothing and says so (deployed:false)', async () => {
+    const agent: CodingAgent = {
+      run: async (input) => {
+        if (input.mode === 'create') fs.writeFileSync(path.join(input.projectDir, 'server.js'), 'v1');
+        // edit: touch nothing → tree stays clean, HEAD unchanged.
+        return { ok: true, summary: 'nothing to change', durationMs: 1 };
+      },
+    };
+    const engine = fakeEngine();
+    const orch = makeOrch(agent, engine);
+    const created = await orch.enqueue('create', 'сделай сервис', () => {});
+    const before = store.getProject(created.slug)!;
+
+    const edited = await orch.enqueue('edit', 'ничего не меняй', () => {}, created.slug);
+    expect(edited.ok).toBe(true);
+    expect(edited.deployed).toBe(false);
+    expect(engine.deploys).toHaveLength(1); // no second deploy
+    expect(store.getProject(created.slug)!.currentCommit).toBe(before.currentCommit);
+  });
+
+  it('create: succeeds even when the agent commits its own work', async () => {
+    const agent: CodingAgent = {
+      run: async (input) => {
+        fs.writeFileSync(path.join(input.projectDir, 'server.js'), 'const p = process.env.PORT;');
+        selfCommit(input.projectDir, 'agent: initial version');
+        return { ok: true, summary: 'built', durationMs: 1 };
+      },
+    };
+    const engine = fakeEngine();
+    const orch = makeOrch(agent, engine);
+    const o = await orch.enqueue('create', 'сделай сервис приветствий', () => {});
+    expect(o.ok).toBe(true);
+    expect(o.deployed).toBe(true);
+    expect(engine.deploys).toHaveLength(1);
+    expect(store.getProject(o.slug)!.status).toBe('live');
+    expect(store.getProject(o.slug)!.currentCommit).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it('serializes tasks: second waits for the first', async () => {

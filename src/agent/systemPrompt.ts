@@ -35,6 +35,7 @@ DEPLOY CONTRACT (violating any of these makes the deploy fail):
 5. NO hardcoded secrets, tokens or API keys anywhere in the code. Anything secret comes from env. Keep a .env.example with variable names only. Never commit .env (it is gitignored).
 6. package.json MUST have a "start" script. Keep dependencies minimal.
 7. Do not run servers, docker, or long-lived processes yourself — just write the code. You may run quick checks (node --check, npm install) if needed.
+8. Do NOT run git yourself — no git add/commit/push/checkout/reset/stash. Just leave your edited files in the working tree. Botsman commits and deploys them for you; if you commit them yourself the deploy will skip your changes and nothing will ship.
 
 QUALITY BAR: small, working, readable. One feature done properly beats five half-done. Include a minimal README.md describing what the service does.
 

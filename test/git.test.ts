@@ -91,6 +91,54 @@ describe('project git lifecycle (EPIC C)', () => {
     expect(head).toMatch(/^[0-9a-f]{40}$/);
   });
 
+  it('syncFromBare keeps working-tree commits that bare lacks (no data loss on redeploy)', async () => {
+    // The silent-no-deploy state: an agent committed its work but it was never
+    // syncToBare'd, so the WORKING TREE is ahead of bare. A blind reset --hard
+    // would discard that commit and re-serve stale code; syncFromBare must not.
+    const dir = await initProjectRepo('todo');
+    fs.writeFileSync(path.join(dir, 'a.js'), 'v1');
+    await commitAll('todo', 'v1');
+    await ensureBareRepo('todo', 'http://127.0.0.1:8366', 'tok');
+    await syncToBare('todo'); // bare == v1
+
+    const env = { ...process.env, GIT_AUTHOR_NAME: 'a', GIT_AUTHOR_EMAIL: 'a@x', GIT_COMMITTER_NAME: 'a', GIT_COMMITTER_EMAIL: 'a@x' };
+    fs.writeFileSync(path.join(dir, 'footer.js'), 'built with botsman');
+    execFileSync('git', ['add', '-A'], { cwd: dir, env });
+    execFileSync('git', ['commit', '-qm', 'agent: footer'], { cwd: dir, env });
+    const ahead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir }).toString().trim();
+
+    const head = await syncFromBare('todo');
+
+    // The footer commit survives — HEAD is unchanged, not reset back to bare.
+    expect(head).toBe(ahead);
+    expect(await headCommit('todo')).toBe(ahead);
+    expect(fs.existsSync(path.join(dir, 'footer.js'))).toBe(true);
+    // ...and bare was fast-forwarded to match, so a fresh clone sees the footer.
+    const clone = path.join(home, 'clone-ahead');
+    execFileSync('git', ['clone', '-q', paths.bareRepo('todo'), clone]);
+    expect(fs.existsSync(path.join(clone, 'footer.js'))).toBe(true);
+  });
+
+  it('syncFromBare still pulls bare forward on a normal push (bare ahead)', async () => {
+    const dir = await initProjectRepo('todo');
+    fs.writeFileSync(path.join(dir, 'a.js'), 'v1');
+    await commitAll('todo', 'v1');
+    const bare = await ensureBareRepo('todo', 'http://127.0.0.1:8366', 'tok');
+    await syncToBare('todo');
+
+    // User pushes a commit the working tree hasn't seen (bare ahead).
+    const clone = path.join(home, 'clone-push');
+    const env = { ...process.env, GIT_AUTHOR_NAME: 'u', GIT_AUTHOR_EMAIL: 'u@x', GIT_COMMITTER_NAME: 'u', GIT_COMMITTER_EMAIL: 'u@x' };
+    execFileSync('git', ['clone', '-q', bare, clone]);
+    fs.writeFileSync(path.join(clone, 'pushed.js'), 'user work');
+    execFileSync('git', ['add', '-A'], { cwd: clone, env });
+    execFileSync('git', ['commit', '-qm', 'manual: user work'], { cwd: clone, env });
+    execFileSync('git', ['push', '-q', 'origin', 'main'], { cwd: clone, env });
+
+    await syncFromBare('todo');
+    expect(fs.existsSync(path.join(dir, 'pushed.js'))).toBe(true);
+  });
+
   it('syncFromBareIfAhead fast-forwards user pushes before an agent task', async () => {
     const dir = await initProjectRepo('todo');
     fs.writeFileSync(path.join(dir, 'a.js'), 'v1');

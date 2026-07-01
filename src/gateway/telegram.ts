@@ -24,7 +24,7 @@ import {
   type DevOpsOp, type DevOpsOpId, type DevOpsDeps, type Route,
 } from './devops.js';
 import { homeStatusLines, homeKeyboard, degradedNoneMessage } from './home.js';
-import { failureMessage, withElapsed, formatDeployCheck, detectLang, type DeployCheckFacts } from './format.js';
+import { failureMessage, withElapsed, formatDeployCheck, formatEditOutcome, detectLang, type DeployCheckFacts } from './format.js';
 import { localDevInstructions, cloneUrl } from '../clone.js';
 import type { StructuredLlm, LlmHealth } from '../llm.js';
 import type { HostExec } from '../hostExec.js';
@@ -1861,14 +1861,17 @@ export class TelegramGateway {
       body = formatDeployCheck(facts, detectLang(o.summary || retry?.instruction));
     } else {
       // Edits/rollbacks keep the concise format — the full checklist would be
-      // noise on a one-line change to a project that's already live.
-      const lines = [`✅ *${o.slug}* — deployed`];
-      if (o.url) lines.push(o.url);
-      if (o.summary) lines.push('', o.summary.slice(0, 2000));
-      if (o.warning) lines.push('', `⚠️ ${o.warning}`);
-      if (o.costUsd && o.costUsd > 0) lines.push('', `💸 Tokens: ≈$${o.costUsd.toFixed(2)}`);
-      lines.push('', 'What should I change?');
-      body = lines.join('\n');
+      // noise on a one-line change to a project that's already live. Honest by
+      // construction: an edit that shipped nothing (o.deployed === false) says so
+      // instead of a false "deployed".
+      body = formatEditOutcome({
+        slug: o.slug,
+        deployed: o.deployed,
+        url: o.url,
+        summary: o.summary,
+        warning: o.warning,
+        costUsd: o.costUsd,
+      });
     }
     await this.bot.api.editMessageText(chatId, statusMsgId, body, {
       parse_mode: 'Markdown',

@@ -139,11 +139,34 @@ export async function syncToBare(slug: string): Promise<void> {
   });
 }
 
-/** Pull pushed changes from the bare repo into the working tree (post-receive flow). */
+/**
+ * Pull pushed changes from the bare repo into the working tree (post-receive flow).
+ *
+ * A blind `reset --hard FETCH_HEAD` is data-loss when the WORKING TREE is ahead
+ * of bare — e.g. an agent committed its own work that was never syncToBare'd
+ * (the silent-no-deploy bug leaves exactly this state). Resetting there would
+ * throw those commits away and re-serve stale code. So: if bare is an ancestor
+ * of HEAD (tree ahead), advance bare and KEEP the tree; otherwise take bare's
+ * HEAD as before (the normal push-to-deploy case, and the rare diverged case).
+ */
 export async function syncFromBare(slug: string): Promise<string | null> {
   const dir = paths.projectDir(slug);
   const bare = paths.bareRepo(slug);
   await git(dir, 'fetch', bare, 'main');
+  const head = await git(dir, 'rev-parse', 'HEAD').catch(() => null);
+  const fetched = await git(dir, 'rev-parse', 'FETCH_HEAD');
+  if (head === fetched) return head;
+  if (head) {
+    try {
+      // bare (FETCH_HEAD) is an ancestor of HEAD → the tree has commits bare
+      // lacks. Don't reset backwards; push forward so bare matches the tree.
+      await git(dir, 'merge-base', '--is-ancestor', 'FETCH_HEAD', 'HEAD');
+      await syncToBare(slug);
+      return head;
+    } catch {
+      // Not an ancestor → bare is ahead (normal push) or histories diverged.
+    }
+  }
   await git(dir, 'reset', '--hard', 'FETCH_HEAD');
   return headCommit(slug);
 }
